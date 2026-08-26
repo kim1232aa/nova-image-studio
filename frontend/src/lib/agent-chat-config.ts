@@ -53,6 +53,12 @@ export interface AgentImageRecord {
   width?: number;
   /** 图片自然像素高度 */
   height?: number;
+  /** 远程 URL（CDP 抓图等场景），延迟下载优化：只存 URL，生成时才按需下载 */
+  remoteUrl?: string;
+  /** 商品作用域键；CDP 抓取的商品图会写入商品页面 URL */
+  productKey?: string;
+  /** 商品显示名称，仅用于界面和模型上下文标注 */
+  productName?: string;
   createdAt: number;
 }
 
@@ -65,6 +71,12 @@ export interface AgentProposal {
   prompt: string;
   referencedImageIds: string[];
   reason: string;
+  /** 商品作用域键；多商品提案必须与其参考图属于同一商品 */
+  productKey?: string;
+  /** 商品显示名称 */
+  productName?: string;
+  /** 同一轮后续商品提案；首提案确认或取消后自动展示 */
+  queuedProposals?: AgentProposal[];
   /** 用户语言明确指定的比例/方向（优先级最高），如 "16:9"；未明确则 undefined */
   requestedAspectRatio?: string;
   /** Agent 智能推荐的比例（兜底用），如 "1:1" */
@@ -73,7 +85,7 @@ export interface AgentProposal {
   requestedOutputSize?: string;
   /** 建议温度（0-2），仅对支持温度的模型有效 */
   temperature?: number;
-  /** 建议并行生成数量（1-4） */
+  /** 建议并行生成数量（1-8） */
   parallelCount?: number;
   /** GPT Image 2 质量参数 */
   gptImageQuality?: GptImageQuality;
@@ -102,6 +114,126 @@ export interface AgentProposalData {
   gptImageStyle?: GptImageStyle;
   gptImageBackground?: GptImageBackground;
   parallelCount: number;
+  productKey?: string;
+  productName?: string;
+}
+
+/**
+ * 从用户消息里提取商品链接并归一化去重（顺序保持首次出现）。
+ * 用于识别「批量商品轮」：带链接的消息结束后允许自动续跑一轮，由模型自己判断还有没有没做完的。
+ */
+export function extractProductLinks(text: string): string[] {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  const pattern = /https?:\/\/[^\s，。；；）)]+/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const key = normalizeProductKey(match[0]);
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+/**
+ * 商品作用域键归一化：同一商品页的链接可能带/不带 mi_id、spm 等追踪参数，
+ * 原始字符串比较会把同一商品误判成两个。淘宝/天猫归一到 item id，其他页面归一到 origin+pathname。
+ * 写入（CDP 登记/旧会话迁移）和比较（提案作用域、卡片过滤）都必须走这里。
+ */
+export function normalizeProductKey(url?: string): string | undefined {
+  const raw = String(url || '').trim();
+  if (!raw) return undefined;
+  // 已归一的 taobao: 短键直通：new URL('taobao:123') 不抛异常但 origin 是 'null'，
+  // 直接走下面逻辑会被二次归一成 'null123'，与提案侧归一结果永远不相等。
+  if (/^taobao:/.test(raw)) return raw;
+  try {
+    const u = new URL(raw);
+    const itemId = u.searchParams.get('id') || u.searchParams.get('itemId');
+    if (itemId && /(^|\.)taobao\.com$|(^|\.)tmall\.com$/.test(u.hostname)) {
+      return `taobao:${itemId}`;
+    }
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * 把提案限制在一个商品作用域内，防止模型误把不同商品图片混在一起。
+ * 没有商品标识的旧单商品记录仍保持原有行为；多商品目录无法确定作用域时，
+ * 只保留没有作用域标记的旧图片，不让任意一个商品的图片泄漏到提案中。
+ */
+export function scopeAgentProposal(proposal: AgentProposal, images: AgentImageRecord[]): AgentProposal {
+  const byId = new Map(images.map(image => [image.imgId, image]));
+  const scopedImages = images.filter(image => Boolean(image.productKey));
+  const productKeys = [...new Set(scopedImages.map(image => normalizeProductKey(image.productKey) as string))];
+  const explicitKey = normalizeProductKey(proposal.productKey);
+  const referencedRecords = proposal.referencedImageIds
+    .map(id => byId.get(id))
+    .filter((image): image is AgentImageRecord => Boolean(image));
+  const referencedKeys = [...new Set(referencedRecords.map(image => normalizeProductKey(image.productKey)).filter((key): key is string => Boolean(key)))];
+
+  let productKey = explicitKey;
+  if (!productKey && proposal.productName) {
+    const named = scopedImages.find(image => image.productName === proposal.productName || image.description.includes(proposal.productName!));
+    productKey = normalizeProductKey(named?.productKey);
+  }
+  if (!productKey && referencedKeys.length > 0) productKey = referencedKeys[0];
+  if (!productKey && productKeys.length === 1) productKey = productKeys[0];
+
+  const allowedIds = proposal.referencedImageIds.filter(id => {
+    const image = byId.get(id);
+    if (!image) return false;
+    if (productKey) return normalizeProductKey(image.productKey) === productKey;
+    if (productKeys.length > 1) return !image.productKey;
+    return true;
+  });
+  const matchingImage = productKey ? scopedImages.find(image => normalizeProductKey(image.productKey) === productKey) : undefined;
+  const productName = proposal.productName || matchingImage?.productName;
+
+  return {
+    ...proposal,
+    productKey,
+    productName,
+    referencedImageIds: allowedIds,
+    queuedProposals: proposal.queuedProposals?.map(item => scopeAgentProposal(item, images)),
+  };
+}
+
+/**
+ * 让用户可见的方向词与最终提交的 aspectRatio 保持一致。
+ * Agent 可能先写出“横版/竖版”，而模型合法化后实际比例发生了变化，
+ * 因此在提案确认前统一修正方向词和显式比例。
+ */
+export function alignAgentPromptAspectRatio(prompt: string, aspectRatio?: string): string {
+  const ratio = String(aspectRatio || '').trim();
+  if (!ratio || ratio === 'auto') return prompt;
+
+  const match = ratio.match(/^\s*(\d+(?:\.\d+)?)\s*[:：]\s*(\d+(?:\.\d+)?)\s*$/);
+  if (!match) return prompt;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return prompt;
+
+  const direction = width === height ? 'square' : width > height ? 'landscape' : 'portrait';
+  const directionLabel = direction === 'square' ? '正方形' : direction === 'landscape' ? '横版' : '竖版';
+  const ratioPattern = /\b\d+(?:\.\d+)?\s*[:：]\s*\d+(?:\.\d+)?\b/g;
+  let aligned = prompt.replace(ratioPattern, ratio);
+
+  // 只替换构图声明词（横版/竖版等）；"横向排布""竖向滚动"是布局副词，不能动
+  if (direction === 'landscape') {
+    aligned = aligned.replace(/竖版|竖屏|纵版|纵屏|肖像版|portrait/gi, '横版');
+  } else if (direction === 'portrait') {
+    aligned = aligned.replace(/横版|横屏|宽屏|风景版|landscape/gi, '竖版');
+  } else {
+    aligned = aligned.replace(/横版|横屏|宽屏|风景版|landscape|竖版|竖屏|纵版|纵屏|肖像版|portrait/gi, '正方形');
+  }
+
+  if (!aligned.includes(ratio)) aligned = `${aligned}${aligned.trim() ? '，' : ''}画面比例 ${ratio}`;
+  if (!aligned.includes(directionLabel)) aligned = `${aligned}${aligned.trim() ? '，' : ''}${directionLabel}`;
+  return aligned;
 }
 
 // ===== System 指令 =====
@@ -129,7 +261,7 @@ export const AGENT_SYSTEM_INSTRUCTIONS = `你是一个图像生成与编辑助�
 - suggested_aspect_ratio：无论用户是否说过，都给一个你认为最合适的比例（如肖像给 "2:3"、风景给 "16:9"、图标给 "1:1"）。当用户没明确指定、也没有可参考的上传图时作为兜底。
 - requested_output_size：只有当用户明确要求清晰度/分辨率档位时才填，取值 "512"/"1K"/"2K"/"4K"/"auto" 之一，否则给 null。
 - temperature：用户表达「更随机/更有创意」给偏高值（接近 2），「更精确/更稳定」给偏低值（接近 0），无明确倾向给 1 或 null。
-- parallel_count：用户要「多出几张/多个方案」时给 2-4，否则给 1 或 null。
+- parallel_count：用户要「多出几张/多个方案」时给对应数量（1-8）；用户说「每个链接/每个商品生成 N 张」时给 N；否则给 1 或 null。
 - gpt_image_quality：当用户明确要求 GPT Image 2 的质量档位时填 "high"/"medium"/"low"，无明确需求给 "auto" 或 null。
 - gpt_image_style：当用户明确要求鲜明、夸张、强表现力时填 "vivid"；要求自然、写实时填 "natural"；无明确需求给 null。
 - gpt_image_background：用户明确要求透明背景、抠图、无背景时填 "transparent"；明确要求实底/不透明时填 "opaque"；否则给 "auto" 或 null。
@@ -146,6 +278,20 @@ export const AGENT_SYSTEM_INSTRUCTIONS = `你是一个图像生成与编辑助�
 - 信息不足、拿不准用户到底要不要画图时，先用文字追问，不要急着调用工具。
 
 注意：最终是否执行由用户在确认面板里决定，用户可以修改你的提示词、增删参考图，或直接取消。`;
+
+// ===== 浏览器操作（CDP）系统指令后缀：仅在用户开启「浏览器」开关时追加 =====
+
+export const AGENT_CDP_SYSTEM_SUFFIX = `
+
+浏览器能力（本机调试浏览器 / CDP）：
+- 通用工具：browser_status、browser_set_port、browser_list_tabs、browser_open_url、browser_read_page、browser_save_images。
+- 用户指定端口时先 browser_set_port。没开调试浏览器时，status / open_url / list_tabs 会自动启动一个独立浏览器（不含日常登录态）。
+- 普通网页用 browser_read_page。淘宝/天猫商品页再用 browser_read_taobao 提炼标题、价格、店铺、SKU、主图和详情图链接。
+- 淘宝/天猫商品页调用 browser_read_taobao 后，主图会自动抓到本地并登记。直接用返回的 img_ 编号做参考图，不要改写或猜测图片 URL。
+- 还需要额外详情图时，把提炼结果里的原始图片 URL 原样交给 browser_save_images，不要改后缀或域名。
+- 图片目录和历史消息里，每张抓来的图都标注了它属于哪个商品（《商品标题》）。用户一次给多个商品链接时，抓完所有商品后，在同一轮里为每个商品分别调用一次 propose_image_action（每个提案的 product_key/product_name 填对应商品，referenced_image_ids 只能引用该商品名下的图，禁止跨商品混用）。系统会把多个提案排队，逐个展示给用户确认，不需要等用户说"继续"。
+- 用户说「每个链接/每个商品生成 N 张」时，每个商品提案的 parallel_count 都填 N；总量按链接数 × N 理解。
+- 工具失败时原样转述后端错误，不要总结成「网络连接失败」。`;
 
 // ===== 工具 schema（Responses API 扁平结构）=====
 
@@ -174,6 +320,14 @@ export const PROPOSE_IMAGE_ACTION_TOOL = {
         type: 'string',
         description: '一句话向用户说明这次提案的判断依据',
       },
+      product_key: {
+        type: ['string', 'null'],
+        description: '所属商品的稳定键，优先使用商品页面 URL；多商品时必须填写，单商品可为 null',
+      },
+      product_name: {
+        type: ['string', 'null'],
+        description: '所属商品名称；多商品时用于展示和校验图片作用域，单商品可为 null',
+      },
       requested_aspect_ratio: {
         type: ['string', 'null'],
         description: '用户明确指定的比例/方向时填（横屏="16:9"，竖屏="9:16"，正方形="1:1"，或 "w:h"），否则 null',
@@ -193,7 +347,7 @@ export const PROPOSE_IMAGE_ACTION_TOOL = {
       },
       parallel_count: {
         type: ['integer', 'null'],
-        description: '建议并行生成数量 1-4，无明确需求给 null',
+        description: '建议并行生成数量 1-8，无明确需求给 null',
       },
       gpt_image_quality: {
         type: ['string', 'null'],
@@ -220,6 +374,8 @@ export const PROPOSE_IMAGE_ACTION_TOOL = {
       'prompt',
       'referenced_image_ids',
       'reason',
+      'product_key',
+      'product_name',
       'requested_aspect_ratio',
       'suggested_aspect_ratio',
       'requested_output_size',

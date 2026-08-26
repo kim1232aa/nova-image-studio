@@ -4,12 +4,14 @@
 import {
   AGENT_TEXT_MODEL_FALLBACK,
   AGENT_SYSTEM_INSTRUCTIONS,
+  AGENT_CDP_SYSTEM_SUFFIX,
   AGENT_IMAGE_DESCRIBE_PROMPT,
   PROPOSE_IMAGE_ACTION_TOOL,
   type AgentMessage,
   type AgentProposal,
   type AgentActionType,
 } from '@/lib/agent-chat-config';
+import { AGENT_CDP_TOOLS, isAgentCdpTool } from '@/lib/agent-cdp-tools';
 import {
   normalizeGptImageBackground,
   normalizeGptImageQuality,
@@ -37,6 +39,9 @@ class AgentRequestTimeoutError extends Error {
 export interface AgentCatalogEntry {
   imgId: string;
   description: string;
+  /** 商品作用域；同一提案只能引用同一 productKey 的图片 */
+  productKey?: string;
+  productName?: string;
 }
 
 export interface StreamAgentInput {
@@ -47,15 +52,22 @@ export interface StreamAgentInput {
   catalog: AgentCatalogEntry[];
   modelCatalog: AgentModelCatalogEntry[];
   webSearch?: boolean;
+  /** 开启后向模型声明浏览器 CDP 工具，并在本轮对话中执行工具循环 */
+  cdp?: boolean;
+  /** CDP 工具执行器（一般由 useAgentChat 注入，负责把抓到的图片登记进图片目录） */
+  cdpExecutor?: (name: string, args: Record<string, unknown>, onProgress?: (text: string) => void) => Promise<string>;
 }
 
 export interface StreamAgentCallbacks {
   onDelta(token: string): void;
   onReasoning(token: string): void;
-  onDone(fullText: string, proposal: AgentProposal | null): void;
+  /** 第三个参数为同轮解析出的全部提案；旧调用方只消费前两个参数即可。 */
+  onDone(fullText: string, proposal: AgentProposal | null, proposals?: AgentProposal[]): void;
   onRetry?(attempt: number, maxAttempts: number, err: Error): void;
   onResetAttempt?(): void;
   onError(err: Error): void;
+  /** 工具循环中每次执行浏览器工具时回调，用于在思考流中展示 */
+  onToolActivity?(text: string): void;
 }
 
 export interface StreamAgentHandle {
@@ -63,7 +75,7 @@ export interface StreamAgentHandle {
   promise: Promise<void>;
 }
 
-function buildInstructions(catalog: AgentCatalogEntry[], modelCatalog: AgentModelCatalogEntry[]): string {
+function buildInstructions(catalog: AgentCatalogEntry[], modelCatalog: AgentModelCatalogEntry[], cdpEnabled = false): string {
   let instructions = AGENT_SYSTEM_INSTRUCTIONS;
 
   if (modelCatalog.length > 0) {
@@ -78,8 +90,16 @@ function buildInstructions(catalog: AgentCatalogEntry[], modelCatalog: AgentMode
   if (catalog.length === 0) {
     instructions += '\n\n当前可用图片目录：（空，还没有任何图片）';
   } else {
-    const lines = catalog.map(entry => `[${entry.imgId}] ${entry.description}`).join('\n');
+    const lines = catalog.map(entry => {
+      const productLabel = entry.productName || entry.productKey;
+      const scope = productLabel ? `｜所属商品：${productLabel}${entry.productKey && entry.productKey !== productLabel ? `（${entry.productKey}）` : ''}` : '';
+      return `[${entry.imgId}] ${entry.description}${scope}`;
+    }).join('\n');
     instructions += `\n\n当前可用图片目录：\n${lines}`;
+  }
+
+  if (cdpEnabled) {
+    instructions += AGENT_CDP_SYSTEM_SUFFIX;
   }
 
   return instructions;
@@ -135,10 +155,12 @@ interface ResponsesEventEnvelope {
   delta?: string;
   text?: string;
   arguments?: string;
-  item?: { type?: string; name?: string; arguments?: string };
+  output_index?: number;
+  item_id?: string;
+  item?: { type?: string; id?: string; call_id?: string; name?: string; arguments?: string };
   response?: {
     output_text?: string;
-    output?: Array<{ type?: string; name?: string; arguments?: string }>;
+    output?: Array<{ type?: string; id?: string; call_id?: string; name?: string; arguments?: string }>;
   };
   error?: { message?: string };
   message?: string;
@@ -153,7 +175,8 @@ interface ChatCompletionsEventEnvelope {
       reasoning_text?: string;
       tool_calls?: Array<{
         index?: number;
-        function?: { arguments?: string };
+        id?: string;
+        function?: { name?: string; arguments?: string };
       }>;
     };
     message?: {
@@ -161,7 +184,10 @@ interface ChatCompletionsEventEnvelope {
       reasoning_content?: string;
       reasoning?: string;
       reasoning_text?: string;
-      tool_calls?: Array<{ function?: { arguments?: string } }>;
+      tool_calls?: Array<{
+        id?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
     };
   }>;
   error?: { message?: string };
@@ -173,6 +199,8 @@ interface MessagesEventEnvelope {
   index?: number;
   content_block?: {
     type?: string;
+    id?: string;
+    name?: string;
     text?: string;
     input?: unknown;
   };
@@ -183,7 +211,7 @@ interface MessagesEventEnvelope {
     partial_json?: string;
   };
   error?: { message?: string };
-  message?: { content?: Array<{ type?: string; text?: string; input?: unknown }> };
+  message?: { content?: Array<{ type?: string; id?: string; name?: string; text?: string; input?: unknown }> };
 }
 
 function normalizeAction(value: unknown): AgentActionType {
@@ -223,12 +251,26 @@ function parseProposalArguments(raw: string): AgentProposal | null {
     const requestedModelId = typeof parsed.requested_model_id === 'string' && parsed.requested_model_id.trim().length > 0
       ? parsed.requested_model_id.trim()
       : undefined;
+    const productKeyValue = typeof parsed.product_key === 'string'
+      ? parsed.product_key
+      : typeof parsed.productKey === 'string'
+        ? parsed.productKey
+        : undefined;
+    const productKey = productKeyValue?.trim() || undefined;
+    const productNameValue = typeof parsed.product_name === 'string'
+      ? parsed.product_name
+      : typeof parsed.productName === 'string'
+        ? parsed.productName
+        : undefined;
+    const productName = productNameValue?.trim() || undefined;
 
     return {
       action,
       prompt,
       reason,
       referencedImageIds: ids,
+      productKey,
+      productName,
       requestedAspectRatio,
       suggestedAspectRatio,
       requestedOutputSize,
@@ -276,11 +318,8 @@ async function runAgentStreamWithRetry(
   for (let attempt = 1; attempt <= AGENT_GPT_REQUEST_MAX_ATTEMPTS; attempt++) {
     if (signal.aborted) return;
     try {
-      await runAttemptWithTimeout(
-        attemptSignal => runAgentStream(baseUrl, input, callbacks, attemptSignal),
-        signal,
-        AGENT_CHAT_ATTEMPT_TIMEOUT_MS,
-      );
+      // 超时只包单轮模型流，不包整段工具循环：打开淘宝页 + 抓图经常超过 45 秒。
+      await runAgentStream(baseUrl, input, callbacks, signal);
       return;
     } catch (err) {
       if (signal.aborted) return;
@@ -296,15 +335,228 @@ async function runAgentStreamWithRetry(
   throw lastError || new Error('模型请求失败');
 }
 
+// ===== 多轮工具循环 =====
+
+/** 单次对话中 CDP 工具循环的最大轮数（每轮 = 一次流式请求 + 若干工具执行）。
+ * N 个商品的最短路径约 2N 轮（开页+提炼），5 个链接要 10 轮，留余量到 12。 */
+const AGENT_CDP_MAX_TOOL_ROUNDS = 12;
+
+interface CapturedToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+interface RoundResult {
+  text: string;
+  toolCalls: CapturedToolCall[];
+}
+
+/** 协议原生的可变会话状态：每轮工具调用结束后按协议格式回灌 */
+type ConversationState =
+  | { kind: 'chat'; messages: Array<Record<string, unknown>> }
+  | { kind: 'anthropic'; messages: Array<Record<string, unknown>> }
+  | { kind: 'gemini'; contents: Array<{ role: 'user' | 'model'; parts: Array<Record<string, unknown>> }> }
+  | { kind: 'responses'; input: Array<Record<string, unknown>> };
+
+function initConversationState(
+  protocol: TextProviderProtocol,
+  history: AgentMessage[],
+  instructions: string,
+): ConversationState {
+  if (protocol === 'openai-chat-completions') {
+    return { kind: 'chat', messages: buildChatMessages(history, instructions) as unknown as Array<Record<string, unknown>> };
+  }
+  if (protocol === 'anthropic-messages') {
+    return { kind: 'anthropic', messages: buildAnthropicMessages(history) as unknown as Array<Record<string, unknown>> };
+  }
+  if (protocol === 'google-gemini') {
+    return { kind: 'gemini', contents: buildGeminiContents(history, instructions) };
+  }
+  return { kind: 'responses', input: buildInputMessages(history) as unknown as Array<Record<string, unknown>> };
+}
+
+function safeParseJsonObject(raw: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(raw || '{}');
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+/** 把本轮的助手工具调用与工具结果按协议原生格式追加进会话状态 */
+function appendToolExchange(
+  conversation: ConversationState,
+  exchanges: Array<{ call: CapturedToolCall; result: string }>,
+  roundText: string,
+): void {
+  // 统一补齐缺失的调用 id（gemini 无 id 概念，仅其他协议用到）
+  const normalized = exchanges.map(({ call, result }, i) => ({
+    id: call.id || `nova_call_${Date.now()}_${i}`,
+    name: call.name,
+    arguments: call.arguments || '{}',
+    result,
+  }));
+
+  if (conversation.kind === 'chat') {
+    conversation.messages.push({
+      role: 'assistant',
+      content: roundText || null,
+      tool_calls: normalized.map(call => ({
+        id: call.id,
+        type: 'function',
+        function: { name: call.name, arguments: call.arguments },
+      })),
+    });
+    for (const call of normalized) {
+      conversation.messages.push({ role: 'tool', tool_call_id: call.id, content: call.result });
+    }
+    return;
+  }
+
+  if (conversation.kind === 'anthropic') {
+    const assistantContent: Array<Record<string, unknown>> = [];
+    if (roundText) assistantContent.push({ type: 'text', text: roundText });
+    for (const call of normalized) {
+      assistantContent.push({ type: 'tool_use', id: call.id, name: call.name, input: safeParseJsonObject(call.arguments) });
+    }
+    conversation.messages.push({ role: 'assistant', content: assistantContent });
+    conversation.messages.push({
+      role: 'user',
+      content: normalized.map(call => ({ type: 'tool_result', tool_use_id: call.id, content: call.result })),
+    });
+    return;
+  }
+
+  if (conversation.kind === 'gemini') {
+    const modelParts: Array<Record<string, unknown>> = [];
+    if (roundText) modelParts.push({ text: roundText });
+    for (const call of normalized) {
+      modelParts.push({ functionCall: { name: call.name, args: safeParseJsonObject(call.arguments) } });
+    }
+    conversation.contents.push({ role: 'model', parts: modelParts });
+    conversation.contents.push({
+      role: 'user',
+      parts: normalized.map(call => ({ functionResponse: { name: call.name, response: { result: call.result } } })),
+    });
+    return;
+  }
+
+  if (roundText) {
+    conversation.input.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: roundText }] });
+  }
+  for (const call of normalized) {
+    conversation.input.push({ type: 'function_call', call_id: call.id, name: call.name, arguments: call.arguments });
+  }
+  for (const call of normalized) {
+    conversation.input.push({ type: 'function_call_output', call_id: call.id, output: call.result });
+  }
+}
+
+async function executeCdpCall(
+  executor: NonNullable<StreamAgentInput['cdpExecutor']>,
+  call: CapturedToolCall,
+  onProgress?: (text: string) => void,
+): Promise<string> {
+  // safeParseJsonObject 对非法 JSON 兜底返回 {}，工具自己会报「参数错误：缺少 xx」
+  const args = safeParseJsonObject(call.arguments);
+  try {
+    return await executor(call.name, args, onProgress);
+  } catch (err) {
+    return `工具 ${call.name} 执行失败：${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 async function runAgentStream(
   baseUrl: string,
   input: StreamAgentInput,
   callbacks: StreamAgentCallbacks,
   signal: AbortSignal,
 ): Promise<void> {
-  const instructions = buildInstructions(input.catalog, input.modelCatalog);
-  const body = buildAgentRequestBody(input.protocol, input.model || AGENT_TEXT_MODEL_FALLBACK, input.history, instructions, Boolean(input.webSearch));
+  const cdpEnabled = Boolean(input.cdp && input.cdpExecutor);
+  const instructions = buildInstructions(input.catalog, input.modelCatalog, cdpEnabled);
+  const conversation = initConversationState(input.protocol, input.history, instructions);
+  const model = input.model || AGENT_TEXT_MODEL_FALLBACK;
+  const enableNativeWebSearch = Boolean(input.webSearch);
 
+  let accumulated = '';
+  // 跨轮累积的提案：模型常在同一轮里「边给商品 A 提案、边调用浏览器抓商品 B」，
+  // 若只在收尾轮解析提案，早轮提案会被工具循环吃掉。
+  const pendingProposals: AgentProposal[] = [];
+  const pushProposals = (calls: CapturedToolCall[]) => {
+    for (const item of calls
+      .filter(call => call.name === PROPOSE_IMAGE_ACTION_TOOL.name)
+      .map(call => parseProposalArguments(call.arguments))
+      .filter((item): item is AgentProposal => item !== null)) {
+      const duplicated = pendingProposals.some(other => (
+        other.productKey === item.productKey
+        && other.prompt === item.prompt
+        && other.referencedImageIds.join(',') === item.referencedImageIds.join(',')
+      ));
+      if (!duplicated) pendingProposals.push(item);
+    }
+  };
+  if (cdpEnabled) {
+    callbacks.onToolActivity?.('正在连接模型，准备调用浏览器工具…\n');
+  }
+  for (let round = 0; ; round++) {
+    if (signal.aborted) return;
+    const body = buildAgentRequestBody(input.protocol, model, conversation, instructions, enableNativeWebSearch, cdpEnabled);
+    const roundResult = await runAttemptWithTimeout(
+      attemptSignal => streamAgentRound(baseUrl, input, body, callbacks, attemptSignal),
+      signal,
+      AGENT_CHAT_ATTEMPT_TIMEOUT_MS,
+    );
+
+    // 跨轮文本拼接：中间轮的过渡语（如「我先打开这个链接看看」）与最终答复都展示
+    if (round > 0 && accumulated.length > 0 && roundResult.text.length > 0) {
+      accumulated += '\n\n';
+      callbacks.onDelta('\n\n');
+    }
+    accumulated += roundResult.text;
+
+    const cdpCalls = cdpEnabled ? roundResult.toolCalls.filter(call => isAgentCdpTool(call.name)) : [];
+
+    // 同一轮里既读页面又提案时，必须先执行浏览器工具；否则提案是空的，页面也没打开。
+    // 提案本身不丢：先累积，待工具循环收尾后统一交给调用方排队。
+    pushProposals(roundResult.toolCalls);
+    if (cdpCalls.length > 0 && round < AGENT_CDP_MAX_TOOL_ROUNDS - 1) {
+      const exchanges: Array<{ call: CapturedToolCall; result: string }> = [];
+      for (const call of cdpCalls) {
+        if (signal.aborted) return;
+        callbacks.onToolActivity?.(`\n[调用浏览器工具] ${call.name}\n`);
+        const result = await executeCdpCall(input.cdpExecutor!, call, callbacks.onToolActivity);
+        exchanges.push({ call, result });
+        if (result.trim()) {
+          accumulated += `\n\n${result.trim()}`;
+          callbacks.onDelta(`\n\n${result.trim()}`);
+        }
+      }
+      appendToolExchange(conversation, exchanges, roundResult.text);
+      continue;
+    }
+
+    if (pendingProposals.length > 0) {
+      callbacks.onDone(accumulated, pendingProposals[0], pendingProposals);
+      return;
+    }
+    const fallbackArgs = roundResult.toolCalls.length > 0
+      ? roundResult.toolCalls[roundResult.toolCalls.length - 1].arguments
+      : '';
+    callbacks.onDone(accumulated, parseProposalArguments(fallbackArgs));
+    return;
+  }
+}
+
+/** 单轮流式请求：发出 body，解析 SSE，返回本轮文本与完整工具调用列表 */
+async function streamAgentRound(
+  baseUrl: string,
+  input: StreamAgentInput,
+  body: Record<string, unknown>,
+  callbacks: StreamAgentCallbacks,
+  signal: AbortSignal,
+): Promise<RoundResult> {
   const response = await fetch('/api/nova/proxy/text', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -327,20 +579,11 @@ async function runAgentStream(
   }
 
   let accumulated = '';
-  let toolArgs = '';
-  let fired = false;
-  const toolArgsByIndex = new Map<number, string>();
-
-  const fireDone = () => {
-    if (fired) return;
-    fired = true;
-    callbacks.onDone(accumulated, parseProposalArguments(toolArgs));
-  };
+  const toolCalls = new Map<string, CapturedToolCall>();
 
   await readSseStream(response.body, signal, (event) => {
     if (!event.data) return;
     if (event.data === '[DONE]') {
-      fireDone();
       return;
     }
 
@@ -354,14 +597,14 @@ async function runAgentStream(
     handleAgentStreamEvent(input.protocol, payload, event.event || '', callbacks, {
       accumulated,
       setAccumulated: next => { accumulated = next; },
-      toolArgs,
-      setToolArgs: next => { toolArgs = next; },
-      toolArgsByIndex,
-      fireDone,
+      toolCalls,
     });
   });
 
-  fireDone();
+  return {
+    text: accumulated,
+    toolCalls: [...toolCalls.values()].filter(call => call.name.length > 0),
+  };
 }
 
 export async function describeImage(
@@ -423,16 +666,19 @@ async function requestImageDescription(
 function buildAgentRequestBody(
   protocol: TextProviderProtocol,
   model: string,
-  history: AgentMessage[],
+  conversation: ConversationState,
   instructions: string,
   enableNativeWebSearch: boolean,
+  enableCdpTools: boolean,
 ) {
+  const cdpTools = enableCdpTools ? AGENT_CDP_TOOLS : [];
+
   if (protocol === 'openai-chat-completions') {
     return {
       model,
       stream: true,
       reasoning_effort: 'high' as const,
-      messages: buildChatMessages(history, instructions),
+      messages: conversation.kind === 'chat' ? conversation.messages : [],
       tools: [
         {
           type: 'function' as const,
@@ -442,6 +688,10 @@ function buildAgentRequestBody(
             parameters: PROPOSE_IMAGE_ACTION_TOOL.parameters,
           },
         },
+        ...cdpTools.map(tool => ({
+          type: 'function' as const,
+          function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+        })),
       ],
       tool_choice: 'auto' as const,
     };
@@ -460,13 +710,14 @@ function buildAgentRequestBody(
       output_config: {
         effort: 'high' as const,
       },
-      messages: buildAnthropicMessages(history),
+      messages: conversation.kind === 'anthropic' ? conversation.messages : [],
       tools: [
         {
           name: PROPOSE_IMAGE_ACTION_TOOL.name,
           description: PROPOSE_IMAGE_ACTION_TOOL.description,
           input_schema: PROPOSE_IMAGE_ACTION_TOOL.parameters,
         },
+        ...cdpTools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })),
         ...(enableNativeWebSearch ? [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }] : []),
       ],
     };
@@ -474,7 +725,7 @@ function buildAgentRequestBody(
 
   if (protocol === 'google-gemini') {
     return {
-      contents: buildGeminiContents(history, instructions),
+      contents: conversation.kind === 'gemini' ? conversation.contents : [],
       tools: [
         {
           function_declarations: [
@@ -483,6 +734,7 @@ function buildAgentRequestBody(
               description: PROPOSE_IMAGE_ACTION_TOOL.description,
               parameters: PROPOSE_IMAGE_ACTION_TOOL.parameters,
             },
+            ...cdpTools.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
           ],
         },
         ...(enableNativeWebSearch ? [{ google_search: {} }] : []),
@@ -501,11 +753,18 @@ function buildAgentRequestBody(
     stream: true,
     reasoning: { effort: 'medium' as const, summary: 'detailed' as const },
     instructions,
-    tools: enableNativeWebSearch
-      ? [PROPOSE_IMAGE_ACTION_TOOL, { type: 'web_search' as const }]
-      : [PROPOSE_IMAGE_ACTION_TOOL],
+    tools: [
+      PROPOSE_IMAGE_ACTION_TOOL,
+      ...cdpTools.map(tool => ({
+        type: 'function' as const,
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      })),
+      ...(enableNativeWebSearch ? [{ type: 'web_search' as const }] : []),
+    ],
     tool_choice: 'auto' as const,
-    input: buildInputMessages(history),
+    input: conversation.kind === 'responses' ? conversation.input : [],
   };
 }
 
@@ -517,10 +776,7 @@ function handleAgentStreamEvent(
   state: {
     accumulated: string;
     setAccumulated: (value: string) => void;
-    toolArgs: string;
-    setToolArgs: (value: string) => void;
-    toolArgsByIndex: Map<number, string>;
-    fireDone: () => void;
+    toolCalls: Map<string, CapturedToolCall>;
   },
 ) {
   if (protocol === 'openai-chat-completions') {
@@ -551,13 +807,14 @@ function handleAgentStreamEvent(
       callbacks.onDelta(textDelta);
     }
 
+    // 流式工具调用：首个 chunk 带 id/name，后续 chunk 只拼 arguments 片段
     for (const toolCall of choice.delta?.tool_calls || []) {
-      const index = typeof toolCall.index === 'number' ? toolCall.index : 0;
-      const fragment = toolCall.function?.arguments || '';
-      if (!fragment) continue;
-      const next = `${state.toolArgsByIndex.get(index) || ''}${fragment}`;
-      state.toolArgsByIndex.set(index, next);
-      state.setToolArgs(next);
+      const key = String(typeof toolCall.index === 'number' ? toolCall.index : 0);
+      const draft = state.toolCalls.get(key) || { id: '', name: '', arguments: '' };
+      if (typeof toolCall.id === 'string' && toolCall.id.length > 0) draft.id = toolCall.id;
+      if (typeof toolCall.function?.name === 'string' && toolCall.function.name.length > 0) draft.name = toolCall.function.name;
+      if (typeof toolCall.function?.arguments === 'string') draft.arguments += toolCall.function.arguments;
+      state.toolCalls.set(key, draft);
     }
 
     const reasoningFull = [
@@ -569,11 +826,16 @@ function handleAgentStreamEvent(
       callbacks.onReasoning(reasoningFull);
     }
 
+    // 非流式兜底：完整 message 里带完整 tool_calls
     for (const toolCall of choice.message?.tool_calls || []) {
-      const fullArgs = toolCall.function?.arguments;
-      if (typeof fullArgs === 'string' && fullArgs.length > 0) {
-        state.setToolArgs(fullArgs);
-      }
+      const name = typeof toolCall.function?.name === 'string' ? toolCall.function.name : '';
+      const args = typeof toolCall.function?.arguments === 'string' ? toolCall.function.arguments : '';
+      if (!name && !args) continue;
+      state.toolCalls.set(`msg_${state.toolCalls.size}`, {
+        id: typeof toolCall.id === 'string' ? toolCall.id : '',
+        name,
+        arguments: args,
+      });
     }
     return;
   }
@@ -589,10 +851,15 @@ function handleAgentStreamEvent(
       if (chunk.content_block?.type === 'thinking' && typeof chunk.content_block.text === 'string' && chunk.content_block.text.length > 0) {
         callbacks.onReasoning(chunk.content_block.text);
       }
-      if (chunk.content_block?.type === 'tool_use' && chunk.content_block.input && typeof chunk.index === 'number') {
-        const serialized = JSON.stringify(chunk.content_block.input);
-        state.toolArgsByIndex.set(chunk.index, serialized);
-        state.setToolArgs(serialized);
+      if (chunk.content_block?.type === 'tool_use' && typeof chunk.index === 'number') {
+        const input = chunk.content_block.input;
+        state.toolCalls.set(String(chunk.index), {
+          id: typeof chunk.content_block.id === 'string' ? chunk.content_block.id : '',
+          name: typeof chunk.content_block.name === 'string' ? chunk.content_block.name : '',
+          arguments: input && typeof input === 'object' && Object.keys(input as Record<string, unknown>).length > 0
+            ? JSON.stringify(input)
+            : '',
+        });
       }
       return;
     }
@@ -605,19 +872,25 @@ function handleAgentStreamEvent(
         callbacks.onDelta(chunk.delta.text);
       }
       if (typeof chunk.delta?.partial_json === 'string') {
-        const index = typeof chunk.index === 'number' ? chunk.index : 0;
-        const next = `${state.toolArgsByIndex.get(index) || ''}${chunk.delta.partial_json}`;
-        state.toolArgsByIndex.set(index, next);
-        state.setToolArgs(next);
+        const key = String(typeof chunk.index === 'number' ? chunk.index : 0);
+        const draft = state.toolCalls.get(key) || { id: '', name: '', arguments: '' };
+        draft.arguments += chunk.delta.partial_json;
+        state.toolCalls.set(key, draft);
       }
       return;
     }
     if (eventType === 'message_stop') {
-      const finalTool = chunk.message?.content?.find(part => part.type === 'tool_use' && part.input);
-      if (finalTool?.input && state.toolArgs.trim().length === 0) {
-        state.setToolArgs(JSON.stringify(finalTool.input));
+      // 非流式兜底：完整 message 里带 tool_use 且流式过程未捕获到时补齐
+      if (state.toolCalls.size === 0) {
+        for (const part of chunk.message?.content || []) {
+          if (part.type !== 'tool_use' || !part.input) continue;
+          state.toolCalls.set(`stop_${state.toolCalls.size}`, {
+            id: typeof part.id === 'string' ? part.id : '',
+            name: typeof part.name === 'string' ? part.name : '',
+            arguments: JSON.stringify(part.input),
+          });
+        }
       }
-      state.fireDone();
       return;
     }
     if (eventType === 'error') {
@@ -642,8 +915,17 @@ function handleAgentStreamEvent(
             callbacks.onDelta(part.text);
           }
         }
-        if (part.functionCall?.name === PROPOSE_IMAGE_ACTION_TOOL.name && part.functionCall.args) {
-          state.setToolArgs(JSON.stringify(part.functionCall.args));
+        if (part.functionCall?.name) {
+          const args = JSON.stringify(part.functionCall.args || {});
+          // gemini 的 functionCall 一次性完整下发；按 name+args 去重防止重复 chunk
+          const duplicated = [...state.toolCalls.values()].some(call => call.name === part.functionCall!.name && call.arguments === args);
+          if (!duplicated) {
+            state.toolCalls.set(`fn_${state.toolCalls.size}`, {
+              id: part.functionCall.name,
+              name: part.functionCall.name,
+              arguments: args,
+            });
+          }
         }
       }
     }
@@ -679,21 +961,50 @@ function handleAgentStreamEvent(
     }
     return;
   }
+  // responses 协议的工具调用：output_item.added 带 id/name，arguments 经 delta/done 拼装；
+  // 这些事件都带 output_index，用它对齐同一次调用
+  const responsesToolKey = (item?: { id?: string; call_id?: string }) =>
+    typeof chunk.output_index === 'number'
+      ? `out_${chunk.output_index}`
+      : chunk.item_id || item?.call_id || item?.id || `auto_${state.toolCalls.size}`;
+  if (eventType === 'response.output_item.added') {
+    const item = chunk.item;
+    if (item?.type === 'function_call') {
+      state.toolCalls.set(responsesToolKey(item), {
+        id: item.call_id || item.id || '',
+        name: item.name || '',
+        arguments: typeof item.arguments === 'string' ? item.arguments : '',
+      });
+    }
+    return;
+  }
   if (eventType === 'response.function_call_arguments.delta') {
     if (typeof chunk.delta === 'string') {
-      state.setToolArgs(state.toolArgs + chunk.delta);
+      const key = responsesToolKey();
+      const draft = state.toolCalls.get(key) || { id: '', name: '', arguments: '' };
+      draft.arguments += chunk.delta;
+      state.toolCalls.set(key, draft);
     }
     return;
   }
   if (eventType === 'response.function_call_arguments.done') {
     if (typeof chunk.arguments === 'string' && chunk.arguments.length > 0) {
-      state.setToolArgs(chunk.arguments);
+      const key = responsesToolKey();
+      const draft = state.toolCalls.get(key) || { id: '', name: '', arguments: '' };
+      draft.arguments = chunk.arguments;
+      state.toolCalls.set(key, draft);
     }
     return;
   }
   if (eventType === 'response.output_item.done') {
-    if (chunk.item?.type === 'function_call' && typeof chunk.item.arguments === 'string' && chunk.item.arguments.length > 0) {
-      state.setToolArgs(chunk.item.arguments);
+    const item = chunk.item;
+    if (item?.type === 'function_call') {
+      const key = responsesToolKey(item);
+      const draft = state.toolCalls.get(key) || { id: '', name: '', arguments: '' };
+      draft.id = item.call_id || item.id || draft.id;
+      draft.name = item.name || draft.name;
+      if (typeof item.arguments === 'string' && item.arguments.length > 0) draft.arguments = item.arguments;
+      state.toolCalls.set(key, draft);
     }
     return;
   }
@@ -706,11 +1017,21 @@ function handleAgentStreamEvent(
         callbacks.onDelta(tail);
       }
     }
-    const call = chunk.response?.output?.find(item => item.type === 'function_call' && typeof item.arguments === 'string');
-    if (call?.arguments && state.toolArgs.trim().length === 0) {
-      state.setToolArgs(call.arguments);
+    // 兜底：completed 里的完整 output 补齐流式过程中漏掉的调用
+    for (const item of chunk.response?.output || []) {
+      if (item.type !== 'function_call') continue;
+      const id = item.call_id || item.id || '';
+      const existingKey = [...state.toolCalls.entries()].find(([, call]) =>
+        (id && call.id === id) || (item.name && call.name === item.name),
+      )?.[0];
+      const draft = existingKey !== undefined
+        ? state.toolCalls.get(existingKey)!
+        : { id: '', name: '', arguments: '' };
+      draft.id = id || draft.id;
+      draft.name = item.name || draft.name;
+      if (typeof item.arguments === 'string' && item.arguments.length > 0) draft.arguments = item.arguments;
+      state.toolCalls.set(existingKey ?? `done_${state.toolCalls.size}`, draft);
     }
-    state.fireDone();
     return;
   }
   if (eventType === 'error' || eventType === 'response.error') {

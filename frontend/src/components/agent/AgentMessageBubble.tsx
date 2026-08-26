@@ -30,8 +30,11 @@ import type { ImageActionPayload } from '@/lib/image-actions';
 export interface AgentMessageBubbleProps {
   message: AgentMessage;
   imageMap: Map<string, AgentImageRecord>;
+  sessionId: string;
   onWithdraw: (noteId: string) => void;
   onReedit?: (messageId: string) => void;
+  /** 非空闲阶段（生成中/提案确认中）禁止重新编辑，与 useAgentChat 的 phase 守卫一致 */
+  reeditDisabled?: boolean;
   onCopy?: () => void;
   onDelete?: () => void;
   onRollback?: () => void;
@@ -64,11 +67,13 @@ export function AgentMessageBubble({
   imageMap,
   onWithdraw,
   onReedit,
+  reeditDisabled,
   onCopy,
   onDelete,
   onRollback,
   onRetry,
   onRedescribe,
+  sessionId,
 }: AgentMessageBubbleProps) {
   const [previewImages, setPreviewImages] = useState<string[] | null>(null);
   const [previewSourceImages, setPreviewSourceImages] = useState<AgentImageRecord[]>([]);
@@ -120,7 +125,7 @@ export function AgentMessageBubble({
     setPreviewImages(thumbs);
     setPreviewSourceImages(imgs);
 
-    const blobs = await Promise.all(imgs.map(i => getAgentImageBytes(i.imgId)));
+    const blobs = await Promise.all(imgs.map(i => getAgentImageBytes(i.imgId, sessionId)));
     if (token !== previewTokenRef.current) return;
 
     const objectUrls: string[] = [];
@@ -133,7 +138,7 @@ export function AgentMessageBubble({
     });
     previewObjectUrlsRef.current = objectUrls;
     setPreviewImages(fullSrcs);
-  }, [revokePreviewUrls]);
+  }, [revokePreviewUrls, sessionId]);
 
   const closePreview = useCallback(() => {
     previewTokenRef.current++;
@@ -153,7 +158,8 @@ export function AgentMessageBubble({
     sourceRef: img.imgId,
     prompt: getUsableDescription(img.description) || img.description,
     note: getUsableDescription(img.description),
-  }), []);
+    sessionId,
+  }), [sessionId]);
 
   if (message.role === 'context-divider') {
     return (
@@ -277,8 +283,9 @@ export function AgentMessageBubble({
           <button
             type="button"
             onClick={() => onReedit?.(message.id)}
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors self-start"
-            title="重新编辑此轮生图请求"
+            disabled={reeditDisabled}
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors self-start disabled:pointer-events-none disabled:opacity-40"
+            title={reeditDisabled ? '生成或提案确认进行中，结束后再重新编辑' : '重新编辑此轮生图请求'}
           >
             <Pencil className="h-3 w-3" />
             重新编辑

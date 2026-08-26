@@ -364,6 +364,9 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModal
     try {
       await importAllData(file, (progress) => setBackupProgress(progress));
       setBackupSuccess('数据已成功导入，页面将在 2 秒后刷新。');
+      // 立即复位处理中状态：BackupProgress 卸载时会移除 beforeunload 监听，
+      // 否则 2 秒后的刷新（以及窗口关闭）会被拦截，页面卡死在 100%
+      setIsBackupActive(false);
       setTimeout(() => window.location.reload(), 2000);
     } catch (err) {
       setBackupError(err instanceof Error ? err.message : '导入失败');
@@ -481,6 +484,8 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModal
                           { value: 'google', label: 'Google' },
                           { value: 'openai', label: 'OpenAI Images' },
                           { value: 'grok', label: 'Grok Images' },
+                          { value: 'doubao', label: 'Doubao Seedream（火山方舟）' },
+                          { value: 'alibaba-dashscope', label: 'Alibaba Token Plan（百炼）' },
                         ]}
                       />
                     </div>

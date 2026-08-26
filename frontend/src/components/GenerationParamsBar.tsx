@@ -17,9 +17,11 @@ import {
   getSizeOptions,
   getSupportsTemperature,
   normalizeCustomImageSize,
+  sanitizeLayoutForModel,
   supportsAutoLayout,
   supportsCustomSize,
   supportsGptImageAdvancedParams,
+  PARALLEL_COUNT_VALUES,
   type GptImageAdvancedParams,
   type ParallelCount,
 } from '@/lib/model-capabilities';
@@ -69,12 +71,17 @@ export function GenerationParamsBar({ value, onChange, size = 'xs', className }:
   const displaySizeLabel = value.customSize || getOutputSizeLabel(value.outputSize);
   const handleModelChange = (newModel: ModelId) => {
     const nextGpt = getGptImageAdvancedParamsForModel(newModel, value.gptImageAdvancedParams);
-    const nextSizeOptions = getSizeOptions(newModel);
-    const nextOutputSize: OutputSize = value.outputSize === 'auto' && supportsAutoLayout(newModel) ? 'auto' : (nextSizeOptions.find(s => s.value === value.outputSize)?.value || nextSizeOptions[0].value);
-    const nextCustomSize = supportsCustomSize(newModel) ? normalizeCustomImageSize(value.customSize, getCustomSizeMaxSide(newModel)) : undefined;
-    const aspectOptions = getAspectRatioOptions(newModel, nextOutputSize);
-    const nextAspectRatio: AspectRatio = aspectOptions.find(a => a.value === value.aspectRatio) ? value.aspectRatio : (aspectOptions[0]?.value || '1:1');
-    onChange({ model: newModel, outputSize: nextOutputSize, customSize: nextCustomSize, aspectRatio: nextAspectRatio, gptImageAdvancedParams: nextGpt });
+    const sanitized = sanitizeLayoutForModel(newModel, value.outputSize, value.aspectRatio);
+    const nextCustomSize = supportsCustomSize(newModel) && sanitized.outputSize !== 'auto'
+      ? normalizeCustomImageSize(value.customSize, getCustomSizeMaxSide(newModel))
+      : undefined;
+    onChange({
+      model: newModel,
+      outputSize: sanitized.outputSize,
+      customSize: nextCustomSize,
+      aspectRatio: sanitized.aspectRatio,
+      gptImageAdvancedParams: nextGpt,
+    });
   };
 
   const handleSizeChange = (newSize: OutputSize) => {
@@ -198,7 +205,7 @@ export function GenerationParamsBar({ value, onChange, size = 'xs', className }:
           <span className="text-[11px]">x{value.parallelCount}</span>
         </PopoverTrigger>
         <PopoverContent className="w-36 p-1" align="start">
-          {[1, 2, 3, 4].map((count) => (
+          {PARALLEL_COUNT_VALUES.map((count) => (
             <button
               key={count}
               onClick={() => handleParallelCountChange(count as ParallelCount)}

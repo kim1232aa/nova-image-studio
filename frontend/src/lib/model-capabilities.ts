@@ -9,7 +9,8 @@ import {
 import { getImageModelById, loadRegistry } from '@/lib/nova-models';
 import type { AspectRatio, OutputSize, RefImageData, StoredJob } from '@/lib/job-store';
 
-export type ParallelCount = 1 | 2 | 3 | 4;
+export type ParallelCount = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+export const PARALLEL_COUNT_VALUES: ParallelCount[] = [1, 2, 3, 4, 5, 6, 7, 8];
 type FixedOutputSize = Exclude<OutputSize, 'auto'>;
 
 export type GptImageQuality = 'auto' | 'high' | 'medium' | 'low';
@@ -108,6 +109,18 @@ function isGrokImagePreset(presetId: string): boolean {
     || presetId === 'grok-imagine-image-quality'
     || presetId === 'grok-imagine-image-edit';
 }
+
+function isSeedreamPreset(presetId: string): boolean {
+  return presetId === 'doubao-seedream';
+}
+
+function normalizeSeedreamOutputSize(outputSize: OutputSize): '2K' | '4K' {
+  return outputSize === '4K' ? '4K' : '2K';
+}
+
+const SEEDREAM_MIN_OUTPUT_PIXELS = 3686400;
+const SEEDREAM_MAX_OUTPUT_PIXELS = 4096 * 4096;
+const SEEDREAM_SIZE_MULTIPLE = 16;
 
 export const CUSTOM_IMAGE_SIZE_LIMITS = {
   multiple: 16,
@@ -222,6 +235,30 @@ export function getGptImageResolution(outputSize: OutputSize, aspectRatio: Aspec
   return `${width}x${height}`;
 }
 
+function clampSeedreamImageSize(size?: string): string | undefined {
+  const parsed = parseImageSize(size);
+  if (!parsed) return undefined;
+
+  const pixels = parsed.width * parsed.height;
+  if (pixels >= SEEDREAM_MIN_OUTPUT_PIXELS && pixels <= SEEDREAM_MAX_OUTPUT_PIXELS) {
+    return `${parsed.width}x${parsed.height}`;
+  }
+
+  const scale = Math.sqrt((pixels < SEEDREAM_MIN_OUTPUT_PIXELS
+    ? SEEDREAM_MIN_OUTPUT_PIXELS
+    : SEEDREAM_MAX_OUTPUT_PIXELS) / pixels);
+  const align = pixels < SEEDREAM_MIN_OUTPUT_PIXELS
+    ? (value: number) => Math.ceil(value / SEEDREAM_SIZE_MULTIPLE) * SEEDREAM_SIZE_MULTIPLE
+    : (value: number) => Math.max(SEEDREAM_SIZE_MULTIPLE, Math.floor(value / SEEDREAM_SIZE_MULTIPLE) * SEEDREAM_SIZE_MULTIPLE);
+
+  return `${align(parsed.width * scale)}x${align(parsed.height * scale)}`;
+}
+
+function getSeedreamResolution(outputSize: OutputSize, aspectRatio: AspectRatio): string {
+  const legalSize = normalizeSeedreamOutputSize(outputSize);
+  return clampSeedreamImageSize(getGptImageResolution(legalSize, aspectRatio)) || legalSize;
+}
+
 export function normalizeCustomImageSize(size?: string, maxSide?: number): string | undefined {
   const parsed = parseImageSize(size);
   if (!parsed) return undefined;
@@ -234,9 +271,19 @@ export function normalizeCustomImageSize(size?: string, maxSide?: number): strin
   return `${width}x${height}`;
 }
 
+function isAntigravityGeminiModel(model: ModelId, modelConfig = getModelConfig(model)): boolean {
+  const presetId = modelConfig?.builtinPreset || model;
+  if (presetId === 'antigravity-gemini-image') return true;
+  const upstreamId = String(modelConfig?.modelId || '').toLowerCase();
+  return modelConfig?.protocol === 'openai'
+    && upstreamId.includes('gemini')
+    && upstreamId.includes('image');
+}
+
 export function getCustomSizeMaxSide(model: ModelId): number | undefined {
   const modelConfig = getModelConfig(model);
-  return modelConfig?.protocol === 'openai' && modelConfig.maxOutputSize === '4K' ? 3840 : undefined;
+  if (!modelConfig || isAntigravityGeminiModel(model, modelConfig)) return undefined;
+  return modelConfig.protocol === 'openai' && modelConfig.maxOutputSize === '4K' ? 3840 : undefined;
 }
 
 export function supportsCustomSize(model: ModelId): boolean {
@@ -291,6 +338,10 @@ export function getGptImageAdvancedParamsForModel(
 export function getSizeOptions(model: ModelId): { value: OutputSize; label: string }[] {
   const modelConfig = getModelConfig(model);
   if (modelConfig) {
+    if (isSeedreamPreset(modelConfig.builtinPreset)) {
+      const values: OutputSize[] = modelConfig.maxOutputSize === '4K' ? ['2K', '4K'] : ['2K'];
+      return values.map(value => ({ value, label: value }));
+    }
     if (isGrokImagePreset(modelConfig.builtinPreset)) {
       const values: OutputSize[] = modelConfig.maxOutputSize === '2K' || modelConfig.maxOutputSize === '4K'
         ? ['1K', '2K']
@@ -298,16 +349,22 @@ export function getSizeOptions(model: ModelId): { value: OutputSize; label: stri
       return values.map((value) => ({ value, label: value }));
     }
     const values: OutputSize[] = modelConfig.maxOutputSize === '4K'
-      ? (modelConfig.builtinPreset === 'gemini-3.1-flash-image-preview' ? ['512', '1K', '2K', '4K'] : ['1K', '2K', '4K'])
+      ? ['1K', '2K', '4K']
       : modelConfig.maxOutputSize === '2K'
-        ? (modelConfig.builtinPreset === 'gemini-3.1-flash-image-preview' ? ['512', '1K', '2K'] : ['1K', '2K'])
+        ? ['1K', '2K']
         : modelConfig.maxOutputSize === '512'
           ? ['512']
-          : (modelConfig.builtinPreset === 'gemini-3.1-flash-image-preview' ? ['512', '1K'] : ['1K']);
+          : ['1K'];
     return values.map((value) => ({ value, label: value === '512' ? '0.5K' : value }));
   }
 
   const presetId = getBuiltinPresetId(model);
+  if (isSeedreamPreset(presetId)) {
+    return [
+      { value: '2K', label: '2K' },
+      { value: '4K', label: '4K' },
+    ];
+  }
   if (presetId === 'grok-imagine-image') {
     return [{ value: '1K', label: '1K' }];
   }
@@ -319,17 +376,26 @@ export function getSizeOptions(model: ModelId): { value: OutputSize; label: stri
   }
   if (presetId === 'gemini-3.1-flash-image-preview') {
     return [
-      { value: '512', label: '0.5K' },
       { value: '1K', label: '1K' },
       { value: '2K', label: '2K' },
       { value: '4K', label: '4K' },
     ];
   }
-  if (presetId === 'gemini-3-pro-image-preview' || presetId === 'gpt-image-2') {
+  if (
+    presetId === 'gemini-3-pro-image-preview'
+    || presetId === 'antigravity-gemini-image'
+    || presetId === 'gpt-image-2'
+  ) {
     return [
       { value: '1K', label: '1K' },
       { value: '2K', label: '2K' },
       { value: '4K', label: '4K' },
+    ];
+  }
+  if (presetId === 'alibaba-qwen-image' || presetId === 'alibaba-wan-image') {
+    return [
+      { value: '1K', label: '1K' },
+      { value: '2K', label: '2K' },
     ];
   }
   return [{ value: '1K', label: '1K' }];
@@ -346,16 +412,28 @@ export function getOutputSizeLabel(size: OutputSize): string {
 }
 
 export function getAspectRatioOptions(model: ModelId, outputSize: OutputSize): AspectRatioOption[] {
-  if (outputSize === 'auto') {
-    return [{ value: 'auto', label: '自动', resolution: '自动' }];
+  const presetId = getBuiltinPresetId(model);
+  if (isSeedreamPreset(presetId)) {
+    const requestedSize = normalizeSeedreamOutputSize(outputSize);
+    const legalSize = getValidOutputSizes(model).includes(requestedSize) ? requestedSize : '2K';
+    return BANANA2_ASPECT_RATIOS.map(ar => ({
+      value: ar.value,
+      label: ar.label,
+      resolution: getSeedreamResolution(legalSize, ar.value),
+    }));
   }
 
-  const presetId = getBuiltinPresetId(model);
+  if (outputSize === 'auto') {
+    if (!supportsAutoLayout(model)) {
+      return getAspectRatioOptions(model, '1K');
+    }
+    return [{ value: 'auto', label: '自动', resolution: '自动' }];
+  }
 
   if (presetId === 'gemini-2.5-flash-image') {
     return BANANA_ASPECT_RATIOS;
   }
-  if (presetId === 'gemini-3-pro-image-preview') {
+  if (presetId === 'gemini-3-pro-image-preview' || presetId === 'antigravity-gemini-image') {
     return BANANA_PRO_ASPECT_RATIOS.map(ar => ({
       value: ar.value,
       label: ar.label,
@@ -429,9 +507,41 @@ export function normalizeModel(candidate?: string): ModelId {
 }
 
 export function getDefaultRetryLayout(model: ModelId): { outputSize: OutputSize; aspectRatio: AspectRatio } {
+  const presetId = getBuiltinPresetId(model);
+  if (isSeedreamPreset(presetId)) {
+    return { outputSize: '2K', aspectRatio: '1:1' };
+  }
   return supportsAutoLayout(model)
     ? { outputSize: 'auto', aspectRatio: 'auto' }
     : { outputSize: '1K', aspectRatio: '1:1' };
+}
+
+/** Strip residual auto layout for models that do not support it (Gemini / Antigravity Gemini, etc.). */
+export function sanitizeLayoutForModel(
+  model: ModelId,
+  outputSize: OutputSize,
+  aspectRatio: AspectRatio,
+): { outputSize: OutputSize; aspectRatio: AspectRatio } {
+  const defaults = getDefaultRetryLayout(model);
+  const validSizes = getValidOutputSizes(model);
+  let nextSize: OutputSize = validSizes.includes(outputSize) ? outputSize : defaults.outputSize;
+
+  if (!supportsAutoLayout(model) && nextSize === 'auto') {
+    nextSize = defaults.outputSize;
+  }
+
+  if (nextSize === 'auto') {
+    return { outputSize: 'auto', aspectRatio: 'auto' };
+  }
+
+  const validRatios = getAspectRatioOptions(model, nextSize)
+    .map(option => option.value)
+    .filter((value): value is Exclude<AspectRatio, 'auto'> => value !== 'auto');
+  const nextRatio: AspectRatio = validRatios.some(value => value === aspectRatio)
+    ? aspectRatio
+    : (validRatios.some(value => value === defaults.aspectRatio) ? defaults.aspectRatio : (validRatios[0] || '1:1'));
+
+  return { outputSize: nextSize, aspectRatio: nextRatio };
 }
 
 export function isRetryLayoutCompatible(model: ModelId, outputSize: OutputSize, aspectRatio: AspectRatio): boolean {
@@ -444,7 +554,7 @@ export function isRetryLayoutCompatible(model: ModelId, outputSize: OutputSize, 
     return outputSize === '1K';
   }
 
-  if (presetId === 'gemini-3-pro-image-preview') {
+  if (presetId === 'gemini-3-pro-image-preview' || presetId === 'antigravity-gemini-image') {
     return ['1K', '2K', '4K'].includes(outputSize);
   }
 
@@ -454,7 +564,19 @@ export function isRetryLayoutCompatible(model: ModelId, outputSize: OutputSize, 
   }
 
   if (presetId === 'gemini-3.1-flash-image-preview') {
-    return ['512', '1K', '2K', '4K'].includes(outputSize);
+    return ['1K', '2K', '4K'].includes(outputSize);
+  }
+
+  if (presetId === 'alibaba-qwen-image' || presetId === 'alibaba-wan-image') {
+    return getValidOutputSizes(model).includes(outputSize);
+  }
+
+  if (isSeedreamPreset(presetId)) {
+    // 必须跟 getSizeOptions 一样尊重注册表上限：maxOutputSize=2K 的配置不应把 4K 视为合法重试档位。
+    // 没有注册表条目时（如直接用 preset id 查询），默认放开到 2K/4K。
+    const modelConfig = getModelConfig(model);
+    const legalSizes = !modelConfig || modelConfig.maxOutputSize === '4K' ? ['2K', '4K'] : ['2K'];
+    return legalSizes.includes(outputSize);
   }
 
   if (presetId === 'gemini-3.1-flash-lite-image') {
@@ -523,7 +645,7 @@ export function getCompatibleRetryData(job: StoredJob): RetryData {
     ? normalizeCustomImageSize(job.custom_size, getCustomSizeMaxSide(model))
     : undefined;
   const temperature = supportsTemperature && typeof job.temperature === 'number' ? job.temperature : 1;
-  const parallelCount: ParallelCount = [1, 2, 3, 4].includes(job.parallelCount as ParallelCount)
+  const parallelCount: ParallelCount = PARALLEL_COUNT_VALUES.includes(job.parallelCount as ParallelCount)
     ? (job.parallelCount as ParallelCount)
     : 1;
   const advancedParams = getGptImageAdvancedParamsForModel(model, {
@@ -552,8 +674,14 @@ export function getSupportsTemperature(model: ModelId): boolean {
   if (isGptImageModel(model)) return false;
   const presetId = getBuiltinPresetId(model);
   if (isGrokImagePreset(presetId)) return false;
+  if (isSeedreamPreset(presetId)) return false;
+  if (presetId === 'alibaba-qwen-image' || presetId === 'alibaba-wan-image') return false;
+  if (presetId === 'antigravity-gemini-image') return false;
   const modelConfig = getModelConfig(model);
   if (modelConfig?.protocol === 'grok') return false;
+  if (modelConfig?.protocol === 'doubao') return false;
+  if (modelConfig?.protocol === 'alibaba-dashscope') return false;
+  if (isAntigravityGeminiModel(model, modelConfig)) return false;
   return true;
 }
 
@@ -578,7 +706,7 @@ export interface AgentLayoutIntent {
   requestedOutputSize?: string;
   /** 建议温度 0-2 */
   temperature?: number;
-  /** 建议并行数量 1-4 */
+  /** 建议并行数量 1-8 */
   parallelCount?: number;
 }
 
@@ -747,6 +875,6 @@ export function resolveAgentLayout(
 
 function normalizeParallelCount(value?: number): ParallelCount {
   const rounded = Math.round(Number(value) || 1);
-  const clamped = clampNumber(rounded, 1, 4);
+  const clamped = clampNumber(rounded, 1, 8);
   return clamped as ParallelCount;
 }

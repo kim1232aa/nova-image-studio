@@ -86,11 +86,10 @@ Nova Image Studio（简称 Nova Image）是一个面向个人/团队的 AI 图�
 | --- | --- | --- |
 | 🎨 文本生图 | `TextToImageForm` | 纯文字提示词生成图像，支持多图并行 |
 | 🖼️ 图生图 | `ImageToImageForm` | 上传参考图，编辑/转换/风格化 |
-| 🤖 Agent 智能体 | `AgentChatWorkspace` | 多轮对话式生成：聊天 → 方案 → 出图，支持 vision 描述、联网搜索、reasoning |
+| 🤖 Agent 智能体 | `AgentChatWorkspace` | 多轮对话式生成：聊天 → 方案 → 出图，支持 vision 描述、联网搜索、reasoning、本机浏览器 CDP（打开/读取页面；淘宝商品页可提炼标题 SKU 主图） |
 | ✂️ UI设计模式 | `SliceWorkspace` | UI 图 → 切图资产 → 网页复刻（仅宽屏可用，详见下节） |
 | 🔍 反推提示词 | `ReversePromptForm` | 上传图片流式反推提示词（支持所有已配置的文字模型） |
 | 🎬 动图生成 | `GifGenerationWorkspace` | 多帧生图 + 网格拼合，浏览器端编码 GIF（`gifenc`） |
-
 ### UI设计模式（图片切图 + 网页复刻）
 
 把一张平面 UI 图拆解成可复用的切图资产，并进一步复刻为可预览的网页。**仅宽屏模式可用**，窄屏显示切换提示。
@@ -174,10 +173,13 @@ nova-image-studio/
 │   └── vitest.config.ts
 ├── backend/
 │   ├── server.js             # Node 服务（HTTP + WS + SQLite + 任务队列）
+│   ├── cdp.js                # 浏览器 CDP 网络工具（连接本机 Chrome 调试端口）
+│   ├── taobao-extract.js     # 淘宝/天猫商品页信息提取（页面内注入脚本）
 │   ├── prompts.json          # 提示词广场内容
 │   ├── blacklist.json        # 敏感词
 │   ├── .env.example
 │   └── package.json
+├── desktop/                  # Electron 桌面壳（Windows / macOS 打包）
 ├── scripts/
 │   ├── pack.js               # 打包：build + 汇总到 out.zip
 │   └── generate-icons.js     # 生成 PWA 图标
@@ -187,6 +189,40 @@ nova-image-studio/
 ```
 
 > 生产构建会输出到 `frontend/out/`，由后端 `server.js` 静态托管。
+
+---
+
+## 🖥️ 桌面版（Windows / macOS）
+
+桌面版把前端、后端和 Electron 壳打包成单一安装包，双击即用，无需自行安装 Node.js 与配置环境。
+
+- **下载安装**：从 Releases 页面下载对应平台的安装包（macOS 为 `.dmg` / `.zip`，Windows 为 `.exe`）。
+
+  > ⚠️ 安装包未配置代码签名证书：macOS 首次打开需在 Finder 中**右键 →「打开」**；Windows 安装/运行时会出现 **SmartScreen** 提示，选择「仍要运行」即可。
+
+- **源码构建**：
+
+  ```bash
+  npm install                 # 安装根依赖（electron / electron-builder）
+  npm run install:all         # 安装 frontend 与 backend 依赖
+  npm run electron:dist:win   # 构建 Windows 安装包
+  npm run electron:dist:mac   # 构建 macOS 安装包
+  ```
+
+  产物输出到根目录 `release/`。
+
+- **数据存储**：数据库与生成的图片保存在系统 userData 目录（Windows 的 `%APPDATA%`、macOS 的 `~/Library/Application Support` 下），卸载/重装安装包不影响数据。
+- **桌面版独享能力**：一键启动调试浏览器、浏览器 CDP 网络工具（详见下节）。
+
+---
+
+## 🌐 浏览器 CDP
+
+通过 Chrome DevTools Protocol 连接本机调试端口（默认 9222，可在 Agent 里改成 9224）。Agent 打开「浏览器」开关后可以：打开/列出标签页、读任意网页正文；若当前页是淘宝/天猫商品页，再用 `browser_read_taobao` 提炼标题、价格、店铺、SKU、主图和详情图链接。
+
+日常 Chrome 默认不允许给默认用户目录加 `--remote-debugging-port`。可以自己用独立 `user-data-dir` 启动，或让 Agent 自动拉起专用调试浏览器（独立配置，需重新登录）。
+
+CDP 只连 `127.0.0.1`，只读你打开的标签页。
 
 ---
 
@@ -435,6 +471,14 @@ docker push tianjiangqiji/nova-image-studio:latest
 | `NOVA_RATE_LIMIT_RETRY_AFTER_SECONDS` | 否 | `30` | 队列满/限流时响应头 `Retry-After` 秒数 |
 | `PROMPT_GALLERY_MODE` | 否 | `2` | `1` 常驻 / `2` 私密密码（点七下标题） / `3` 关闭 |
 | `PROMPT_GALLERY_PASSWORD` | 否 | 空 | 提示词广场私密模式密码；为空时私密模式可直接开启 |
+| `NOVA_CDP_ENABLED` | 否 | `true` | 浏览器 CDP 总开关；`false` 时所有 `/api/nova/cdp/*` 返回 404（重启生效） |
+| `NOVA_CDP_HOST` | 否 | `127.0.0.1` | 本机 Chrome 调试端口地址（热生效） |
+| `NOVA_CDP_PORT` | 否 | `9222` | 本机 Chrome 调试端口默认值（热生效；也可在 Agent 里改） |
+| `NOVA_CDP_TIMEOUT_MS` | 否 | `20000` | CDP 请求超时，单位毫秒（热生效） |
+| `NOVA_CDP_LAUNCH_ENABLED` | 否 | `true` | 允许从应用内一键启动调试浏览器（热生效，仅本地/桌面场景有意义） |
+| `NOVA_CDP_EVAL_ENABLED` | 否 | `false` | 允许 `/api/nova/cdp/evaluate` 在页面内执行任意 JS（热生效，风险较高，默认关闭） |
+| `NOVA_CDP_DIR` | 否 | 图片目录同级 `cdp-products` | 商品素材落盘目录（重启生效） |
+| `NOVA_CHROME_PATH` | 否 | 空 | 覆盖浏览器可执行文件路径，默认自动探测（重启生效） |
 
 > `.env` 修改后大部分运行时配置**实时生效**（任务并发、限流、队列容量、接单开关、广场模式），无需重启；`PORT`、`HOSTNAME`、`NODE_ENV`、`NOVA_TASK_DB`、`NOVA_IMAGE_DIR` 这类启动级配置仍需重启。
 
@@ -455,6 +499,18 @@ docker push tianjiangqiji/nova-image-studio:latest
 | `GET` | `/api/nova/config` | 前端配置（如 `promptGalleryMode`） |
 | `GET` | `/api/nova/images/:taskId/:index` | 任务产物图片 |
 | `WS` | `/api/nova/ws` | 实时任务 / 队列订阅 |
+| `GET` | `/api/nova/cdp/status` | 调试浏览器连接状态，含当前 host/port（本地/桌面场景） |
+| `GET` | `/api/nova/cdp/config` | 读取当前 CDP 端口配置（本地/桌面场景） |
+| `POST` | `/api/nova/cdp/config` | 热更新 CDP 端口（写入运行时配置，本地/桌面场景） |
+| `GET` | `/api/nova/cdp/targets` | 列出调试浏览器中的 page 标签页（本地/桌面场景） |
+| `POST` | `/api/nova/cdp/open` | 在调试浏览器中打开新标签页并访问指定 URL（本地/桌面场景） |
+| `POST` | `/api/nova/cdp/read-page` | 读取指定标签页的正文文本（去脚本/样式，本地/桌面场景） |
+| `POST` | `/api/nova/cdp/extract` | 提取指定标签页的淘宝/天猫商品信息（本地/桌面场景） |
+| `POST` | `/api/nova/cdp/fetch-image` | 下载商品图（单张或 ≤30 张批量）到本地素材库（本地/桌面场景） |
+| `POST` | `/api/nova/cdp/screenshot` | 对指定标签页截图并落盘（本地/桌面场景） |
+| `POST` | `/api/nova/cdp/launch` | 一键启动调试浏览器（本地/桌面场景，`NOVA_CDP_LAUNCH_ENABLED` 控制） |
+| `POST` | `/api/nova/cdp/evaluate` | 在页面内执行任意 JS（本地/桌面场景，默认关闭） |
+| `GET` | `/api/nova/cdp/products/:file` | 已落盘商品素材静态服务（本地/桌面场景） |
 
 ### 任务状态
 
