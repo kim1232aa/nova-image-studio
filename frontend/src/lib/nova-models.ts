@@ -475,7 +475,7 @@ export function deriveImageAndTextModels(providers: ProviderConfig[]): {
           : inferImagePreset(provider.kind, entry.modelId);
         const preset = BUILTIN_IMAGE_PRESETS[presetId];
         const protocol = provider.kind === 'openai-compatible'
-          ? 'openai'
+          ? (presetId.startsWith('grok-') ? 'grok' : 'openai')
           : imageProtocolForKind(provider.kind);
         imageModels.push({
           id: entry.imageConfigId || `${provider.id}::img::${entry.modelId}`,

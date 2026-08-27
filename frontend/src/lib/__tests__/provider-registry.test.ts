@@ -126,6 +126,23 @@ describe('provider registry', () => {
     expect(registry.textModels[0].id).toBe('txt_old');
   });
 
+  it('maps grok-imagine models on openai-compatible providers to grok protocol', () => {
+    const derived = deriveImageAndTextModels([{
+      id: 'prov_grok',
+      name: 'Gateway',
+      kind: 'openai-compatible',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test',
+      models: [{
+        modelId: 'grok-imagine-image',
+        name: 'Grok Imagine',
+        uses: ['image'],
+      }],
+    }]);
+    expect(derived.imageModels[0].protocol).toBe('grok');
+    expect(derived.imageModels[0].builtinPreset).toBe('grok-imagine-image');
+  });
+
   it('openai-compatible gemini image models keep the openai protocol', () => {
     const derived = deriveImageAndTextModels([{
       id: 'prov_1',
