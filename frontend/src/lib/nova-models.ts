@@ -5,6 +5,15 @@ import {
   isTextProviderProtocol,
   type TextProviderProtocol,
 } from '@/lib/nova-text-protocol';
+import {
+  ensureProviders,
+  imageProtocolForKind,
+  inferImagePreset,
+  migrateLegacyProviders,
+  normalizeProviderBaseUrl,
+  textProtocolForKind,
+  type ProviderConfig,
+} from '@/lib/provider-registry';
 
 export type ProviderProtocol = 'google' | 'openai' | 'grok' | 'doubao' | 'alibaba-dashscope';
 export type ImageOutputSize = '512' | '1K' | '2K' | '4K';
@@ -91,6 +100,7 @@ const TEXT_DEFAULT_TASKS: TextDefaultTask[] = [
 ];
 
 export interface NovaModelRegistry {
+  providers?: ProviderConfig[];
   imageModels: ImageModelConfig[];
   textModels: TextModelConfig[];
   defaults: DefaultModels;
@@ -439,9 +449,91 @@ export function getSliceCapableImageModels(registry: NovaModelRegistry): ImageMo
 
 function getInitialRegistry(): NovaModelRegistry {
   return {
+    providers: [],
     imageModels: [],
     textModels: [],
     defaults: DEFAULT_DEFAULTS,
+  };
+}
+
+export function deriveImageAndTextModels(providers: ProviderConfig[]): {
+  imageModels: ImageModelConfig[];
+  textModels: TextModelConfig[];
+} {
+  const imageModels: ImageModelConfig[] = [];
+  const textModels: TextModelConfig[] = [];
+
+  for (const provider of providers) {
+    const apiKey = provider.apiKey.trim();
+    const baseUrl = normalizeProviderBaseUrl(provider.baseUrl);
+    if (!apiKey || !baseUrl) continue;
+
+    for (const entry of provider.models) {
+      if (entry.uses.includes('image')) {
+        const presetId = entry.builtinPreset && entry.builtinPreset in BUILTIN_IMAGE_PRESETS
+          ? entry.builtinPreset
+          : inferImagePreset(provider.kind, entry.modelId);
+        const preset = BUILTIN_IMAGE_PRESETS[presetId];
+        const protocol = provider.kind === 'openai-compatible'
+          ? 'openai'
+          : imageProtocolForKind(provider.kind);
+        imageModels.push({
+          id: entry.imageConfigId || `${provider.id}::img::${entry.modelId}`,
+          protocol,
+          name: entry.name || entry.modelId,
+          modelId: entry.modelId,
+          apiKey,
+          baseUrl,
+          builtinPreset: presetId,
+          maxRefImages: Number.isFinite(entry.maxRefImages) && Number(entry.maxRefImages) >= 0
+            ? Math.floor(Number(entry.maxRefImages))
+            : preset.maxRefImages,
+          maxOutputSize: entry.maxOutputSize || preset.maxOutputSize,
+          supportsAdvancedParams: protocol === 'openai'
+            ? (typeof entry.supportsAdvancedParams === 'boolean'
+              ? entry.supportsAdvancedParams
+              : preset.supportsAdvancedParams)
+            : false,
+        });
+      }
+
+      if (entry.uses.includes('text')) {
+        const protocol = textProtocolForKind(provider.kind);
+        textModels.push({
+          id: entry.textConfigId || `${provider.id}::txt::${entry.modelId}`,
+          protocol,
+          name: entry.name || entry.modelId,
+          modelId: entry.modelId,
+          apiKey,
+          baseUrl,
+          note: getTextProviderDescription(protocol),
+        });
+      }
+    }
+  }
+
+  return { imageModels, textModels };
+}
+
+function hydrateRegistry(parsed: Partial<NovaModelRegistry>): NovaModelRegistry {
+  let providers = ensureProviders(parsed.providers);
+  const legacyImageModels = ensureImageModels(parsed.imageModels);
+  const legacyTextModels = ensureTextModels(parsed.textModels);
+  if (providers.length === 0 && (legacyImageModels.length > 0 || legacyTextModels.length > 0)) {
+    providers = migrateLegacyProviders(legacyImageModels, legacyTextModels);
+  }
+  const derived = deriveImageAndTextModels(providers);
+  const imageModels = derived.imageModels.length > 0 || providers.length > 0
+    ? derived.imageModels
+    : legacyImageModels;
+  const textModels = derived.textModels.length > 0 || providers.length > 0
+    ? derived.textModels
+    : legacyTextModels;
+  return {
+    providers,
+    imageModels,
+    textModels,
+    defaults: ensureDefaults(parsed.defaults, imageModels, textModels),
   };
 }
 
@@ -455,24 +547,12 @@ export function loadRegistry(): NovaModelRegistry {
     return getInitialRegistry();
   }
 
-  const parsed = JSON.parse(raw) as Partial<NovaModelRegistry>;
-  const imageModels = ensureImageModels(parsed.imageModels);
-  const textModels = ensureTextModels(parsed.textModels);
-  const defaults = ensureDefaults(parsed.defaults, imageModels, textModels);
-  return { imageModels, textModels, defaults };
+  return hydrateRegistry(JSON.parse(raw) as Partial<NovaModelRegistry>);
 }
 
 export function saveRegistry(registry: NovaModelRegistry): void {
   if (typeof window === 'undefined') return;
-
-  const imageModels = ensureImageModels(registry.imageModels);
-  const textModels = ensureTextModels(registry.textModels);
-  const normalized: NovaModelRegistry = {
-    imageModels,
-    textModels,
-    defaults: ensureDefaults(registry.defaults, imageModels, textModels),
-  };
-
+  const normalized = hydrateRegistry(registry);
   localStorage.setItem(REGISTRY_KEY, JSON.stringify(normalized));
 }
 

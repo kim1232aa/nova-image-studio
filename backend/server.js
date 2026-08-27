@@ -2460,12 +2460,20 @@ async function handleApi(req, res, pathname) {
     }
 
     // ===== 模型检查代理（按协议查询模型列表） =====
-    if (req.method === 'GET' && apiPathname === '/api/nova/proxy/models') {
+    if ((req.method === 'GET' || req.method === 'POST') && apiPathname === '/api/nova/proxy/models') {
       try {
         const parsed = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-        const baseUrl = parsed.searchParams.get('baseUrl');
-        const apiKey = parsed.searchParams.get('apiKey');
-        const protocol = parsed.searchParams.get('protocol') || 'openai';
+        const headerBaseUrl = firstHeaderValue(req.headers['x-nova-base-url']);
+        const headerApiKey = firstHeaderValue(req.headers['x-nova-api-key']);
+        let baseUrl = headerBaseUrl || parsed.searchParams.get('baseUrl');
+        let apiKey = headerApiKey || parsed.searchParams.get('apiKey');
+        let protocol = parsed.searchParams.get('protocol') || 'openai';
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req);
+          baseUrl = body.baseUrl || headerBaseUrl || baseUrl;
+          apiKey = body.apiKey || headerApiKey || apiKey;
+          protocol = body.protocol || protocol;
+        }
         if (!baseUrl || !apiKey) {
           sendJson(res, 400, { error: 'Missing baseUrl or apiKey' });
           return true;
