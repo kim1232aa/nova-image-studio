@@ -24,4 +24,16 @@ describe('fetchUpstreamModels', () => {
       protocol: 'openai',
     })).resolves.toEqual(['gpt-4o-mini']);
   });
+
+  it('surfaces JSON error.message instead of dumping the raw payload', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ error: { message: 'invalid api key' } }),
+      { status: 401 },
+    )));
+    await expect(fetchUpstreamModels({
+      baseUrl: 'https://example.test',
+      apiKey: 'test-key',
+      protocol: 'openai',
+    })).rejects.toThrow('invalid api key');
+  });
 });

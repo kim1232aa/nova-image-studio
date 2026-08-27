@@ -127,11 +127,14 @@ export function inferImagePreset(kind: ProviderKind, modelId: string): BuiltinIm
 export function guessModelUses(modelId: string): ModelUse[] {
   const id = String(modelId || '').toLowerCase();
   const uses: ModelUse[] = [];
-  if (/sora|kling|runway|luma|\bveo\b|video/.test(id)) uses.push('video');
-  if (/\btts\b|whisper|speech|audio/.test(id)) uses.push('audio');
-  if (/image|imagen|dall-e|dalle|gpt-image|seedream|banana|flux|wan2|grok-imagine/.test(id)) {
-    uses.push('image');
-  }
+  const isVideo = /sora|kling|runway|luma|\bveo\b|imagine-video|[-_/]video/.test(id);
+  const isAudio = /\btts\b|whisper|speech|\baudio\b/.test(id);
+  const isImage = /imagen|dall-e|dalle|gpt-image|seedream|banana|flux|wan2|grok-imagine-image|grok-imagine-edit/.test(id)
+    || (/(^|[^a-z])image([^a-z]|$)/.test(id) && !isVideo)
+    || (id.includes('grok-imagine') && !isVideo);
+  if (isVideo) uses.push('video');
+  if (isAudio) uses.push('audio');
+  if (isImage) uses.push('image');
   if (uses.length === 0) uses.push('text');
   return uses;
 }
@@ -150,9 +153,13 @@ export function parseUpstreamModelList(payload: unknown): string[] {
   const data = payload as { data?: unknown; models?: unknown };
   if (Array.isArray(data.data)) {
     for (const item of data.data) {
+      if (typeof item === 'string') {
+        add(item);
+        continue;
+      }
       if (!item || typeof item !== 'object') continue;
-      const row = item as { id?: unknown; model?: unknown };
-      add(String(row.id || row.model || ''));
+      const row = item as { id?: unknown; model?: unknown; name?: unknown };
+      add(String(row.id || row.model || row.name || ''));
     }
   }
   if (Array.isArray(data.models)) {

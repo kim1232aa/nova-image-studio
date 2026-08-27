@@ -34,8 +34,16 @@ describe('provider registry', () => {
     expect(guessModelUses('gpt-4o-mini')).toEqual(['text']);
     expect(guessModelUses('gemini-3-pro-image-preview')).toEqual(['image']);
     expect(guessModelUses('grok-imagine-image')).toEqual(['image']);
+    expect(guessModelUses('grok-imagine-video')).toEqual(['video']);
     expect(guessModelUses('sora-2')).toEqual(['video']);
     expect(guessModelUses('whisper-1')).toEqual(['audio']);
+  });
+
+  it('parses OpenAI data arrays that contain bare strings', () => {
+    expect(parseUpstreamModelList({ data: ['gpt-4o-mini', { id: 'grok-4.3' }] })).toEqual([
+      'gpt-4o-mini',
+      'grok-4.3',
+    ]);
   });
 
   it('keeps existing uses when merging fetched ids and only guesses for new rows', () => {

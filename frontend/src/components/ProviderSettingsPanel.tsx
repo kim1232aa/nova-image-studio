@@ -25,7 +25,7 @@ import {
 interface ProviderSettingsPanelProps {
   providers: ProviderConfig[];
   selectedProviderId: string;
-  onChange: (providers: ProviderConfig[]) => void;
+  onChange: (providers: ProviderConfig[] | ((prev: ProviderConfig[]) => ProviderConfig[])) => void;
   onSelect: (id: string) => void;
 }
 
@@ -41,23 +41,27 @@ export function ProviderSettingsPanel({
   const [fetchError, setFetchError] = useState<string | null>(null);
   const selected = providers.find((provider) => provider.id === selectedProviderId) || null;
 
-  const updateSelected = (patch: Partial<ProviderConfig>) => {
+  const updateSelected = (patch: Partial<ProviderConfig> | ((current: ProviderConfig) => ProviderConfig)) => {
     if (!selected) return;
-    onChange(providers.map((provider) => (
-      provider.id === selected.id ? { ...provider, ...patch } : provider
-    )));
+    const id = selected.id;
+    onChange((prev) => prev.map((provider) => {
+      if (provider.id !== id) return provider;
+      return typeof patch === 'function' ? patch(provider) : { ...provider, ...patch };
+    }));
   };
 
   const handleAdd = () => {
     const draft = createProviderDraft();
-    onChange([...providers, draft]);
+    onChange((prev) => [...prev, draft]);
     onSelect(draft.id);
   };
 
   const handleDelete = (id: string) => {
-    const next = providers.filter((provider) => provider.id !== id);
-    onChange(next);
-    if (selectedProviderId === id) onSelect(next[0]?.id || '');
+    onChange((prev) => {
+      const next = prev.filter((provider) => provider.id !== id);
+      if (selectedProviderId === id) onSelect(next[0]?.id || '');
+      return next;
+    });
   };
 
   const handleFetch = async () => {
@@ -74,7 +78,10 @@ export function ProviderSettingsPanel({
         apiKey: selected.apiKey,
         protocol: listProtocolForKind(selected.kind),
       });
-      updateSelected({ models: mergeFetchedModels(selected.models, ids) });
+      updateSelected((current) => ({
+        ...current,
+        models: mergeFetchedModels(current.models, ids),
+      }));
     } catch (error) {
       setFetchError(error instanceof Error ? error.message : '读取模型列表失败');
     } finally {
@@ -84,9 +91,7 @@ export function ProviderSettingsPanel({
 
   const handleAddManual = () => {
     if (!selected) return;
-    const next = addManualProviderModel(selected, manualModelId);
-    if (next === selected) return;
-    onChange(providers.map((provider) => (provider.id === selected.id ? next : provider)));
+    updateSelected((current) => addManualProviderModel(current, manualModelId));
     setManualModelId('');
   };
 
@@ -229,8 +234,7 @@ export function ProviderSettingsPanel({
                             type="checkbox"
                             checked={entry.uses.includes(option.value)}
                             onChange={() => {
-                              const next = toggleProviderModelUse(selected, entry.modelId, option.value as ModelUse);
-                              onChange(providers.map((provider) => (provider.id === selected.id ? next : provider)));
+                              updateSelected((current) => toggleProviderModelUse(current, entry.modelId, option.value as ModelUse));
                             }}
                           />
                         </td>
@@ -240,11 +244,12 @@ export function ProviderSettingsPanel({
                           <Select
                             value={entry.builtinPreset || inferImagePreset(selected.kind, entry.modelId)}
                             onValueChange={(value) => {
-                              updateSelected({
-                                models: selected.models.map((item) => (
+                              updateSelected((current) => ({
+                                ...current,
+                                models: current.models.map((item) => (
                                   item.modelId === entry.modelId ? { ...item, builtinPreset: value as typeof entry.builtinPreset } : item
                                 )),
-                              });
+                              }));
                             }}
                             options={BUILTIN_IMAGE_PRESET_OPTIONS}
                           />
@@ -256,9 +261,10 @@ export function ProviderSettingsPanel({
                         <button
                           type="button"
                           className="text-xs text-destructive"
-                          onClick={() => updateSelected({
-                            models: selected.models.filter((item) => item.modelId !== entry.modelId),
-                          })}
+                          onClick={() => updateSelected((current) => ({
+                            ...current,
+                            models: current.models.filter((item) => item.modelId !== entry.modelId),
+                          }))}
                         >
                           删除
                         </button>
