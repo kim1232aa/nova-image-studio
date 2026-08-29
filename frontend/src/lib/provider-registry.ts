@@ -5,7 +5,7 @@ import type {
   ProviderProtocol,
   TextModelConfig,
 } from '@/lib/nova-models';
-import type { TextProviderProtocol } from '@/lib/nova-text-protocol';
+import { getTextProviderLabel, isTextProviderProtocol, type TextProviderProtocol } from '@/lib/nova-text-protocol';
 
 function createId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -22,6 +22,7 @@ export type ProviderKind =
   | 'alibaba-dashscope';
 
 export interface ProviderModelEntry {
+  id?: string;
   modelId: string;
   name: string;
   uses: ModelUse[];
@@ -29,6 +30,7 @@ export interface ProviderModelEntry {
   imageConfigId?: string;
   textConfigId?: string;
   builtinPreset?: BuiltinImagePresetId;
+  textProtocol?: TextProviderProtocol;
   maxRefImages?: number;
   maxOutputSize?: ImageOutputSize;
   supportsAdvancedParams?: boolean;
@@ -97,6 +99,21 @@ export function textProtocolForKind(kind: ProviderKind): TextProviderProtocol {
   return 'openai-chat-completions';
 }
 
+export function guessTextProtocol(kind: ProviderKind, modelId: string): TextProviderProtocol {
+  if (kind === 'google') return 'google-gemini';
+  if (kind === 'anthropic-messages') return 'anthropic-messages';
+  const id = String(modelId || '').toLowerCase();
+  if (/^gpt-5(\b|[.-])|^o[1-4](\b|[.-])|^chatgpt/.test(id)) return 'openai-responses';
+  return textProtocolForKind(kind);
+}
+
+export const TEXT_PROTOCOL_OPTIONS: { value: TextProviderProtocol; label: string }[] = [
+  { value: 'openai-responses', label: getTextProviderLabel('openai-responses') },
+  { value: 'openai-chat-completions', label: getTextProviderLabel('openai-chat-completions') },
+  { value: 'anthropic-messages', label: getTextProviderLabel('anthropic-messages') },
+  { value: 'google-gemini', label: getTextProviderLabel('google-gemini') },
+];
+
 export function inferImagePreset(kind: ProviderKind, modelId: string): BuiltinImagePresetId {
   const id = String(modelId || '').toLowerCase();
   if (kind === 'google' || (id.includes('gemini') && id.includes('image'))) {
@@ -117,8 +134,8 @@ export function inferImagePreset(kind: ProviderKind, modelId: string): BuiltinIm
   if (kind === 'doubao' || id.includes('seedream') || id.includes('doubao')) {
     return 'doubao-seedream';
   }
-  if (kind === 'alibaba-dashscope' || id.includes('qwen-image') || id.includes('wan')) {
-    if (id.includes('wan')) return 'alibaba-wan-image';
+  if (kind === 'alibaba-dashscope' || id.includes('qwen-image') || id.includes('wan2')) {
+    if (id.includes('wan2')) return 'alibaba-wan-image';
     return 'alibaba-qwen-image';
   }
   return 'gpt-image-2';
@@ -129,14 +146,18 @@ export function guessModelUses(modelId: string): ModelUse[] {
   const uses: ModelUse[] = [];
   const isVideo = /sora|kling|runway|luma|\bveo\b|imagine-video|[-_/]video/.test(id);
   const isAudio = /\btts\b|whisper|speech|\baudio\b/.test(id);
-  const isImage = /imagen|dall-e|dalle|gpt-image|seedream|banana|flux|wan2|grok-imagine-image|grok-imagine-edit/.test(id)
-    || (/(^|[^a-z])image([^a-z]|$)/.test(id) && !isVideo)
-    || (id.includes('grok-imagine') && !isVideo);
+  // 只认明确的生图 id。裸 grok-imagine 不是图模，避免自动读取后误勾「图片」。
+  const isImage = /imagen|dall-e|dalle|gpt-image|seedream|banana|flux|wan2|qwen-image|grok-imagine-image|grok-imagine-edit/.test(id)
+    || (/(^|[^a-z])image([^a-z]|$)/.test(id) && !isVideo);
   if (isVideo) uses.push('video');
   if (isAudio) uses.push('audio');
   if (isImage) uses.push('image');
   if (uses.length === 0) uses.push('text');
   return uses;
+}
+
+export function providerModelRowId(entry: Pick<ProviderModelEntry, 'id' | 'modelId' | 'imageConfigId' | 'textConfigId'>): string {
+  return String(entry.id || entry.imageConfigId || entry.textConfigId || `row_${entry.modelId}`).trim();
 }
 
 export function parseUpstreamModelList(payload: unknown): string[] {
@@ -184,6 +205,7 @@ export function mergeFetchedModels(
   for (const modelId of fetchedIds) {
     if (byId.has(modelId)) continue;
     const entry: ProviderModelEntry = {
+      id: createId('row'),
       modelId,
       name: modelId,
       uses: guessModelUses(modelId),
@@ -203,6 +225,12 @@ export function normalizeProviderModelEntry(raw: Partial<ProviderModelEntry> | n
   const modelId = String(raw?.modelId || '').trim();
   if (!modelId) return null;
   return {
+    id: providerModelRowId({
+      id: String(raw?.id || '').trim(),
+      modelId,
+      imageConfigId: String(raw?.imageConfigId || '').trim() || undefined,
+      textConfigId: String(raw?.textConfigId || '').trim() || undefined,
+    }),
     modelId,
     name: String(raw?.name || modelId).trim() || modelId,
     uses: normalizeUses(raw?.uses),
@@ -210,6 +238,7 @@ export function normalizeProviderModelEntry(raw: Partial<ProviderModelEntry> | n
     imageConfigId: String(raw?.imageConfigId || '').trim() || undefined,
     textConfigId: String(raw?.textConfigId || '').trim() || undefined,
     builtinPreset: raw?.builtinPreset,
+    textProtocol: isTextProviderProtocol(raw?.textProtocol) ? raw.textProtocol : undefined,
     maxRefImages: raw?.maxRefImages,
     maxOutputSize: raw?.maxOutputSize,
     supportsAdvancedParams: raw?.supportsAdvancedParams,
@@ -223,7 +252,7 @@ export function normalizeProviderConfig(raw: Partial<ProviderConfig> | null | un
     ? raw.models
       .map((item) => normalizeProviderModelEntry(item))
       .filter((item): item is ProviderModelEntry => Boolean(item))
-      .filter((item, index, list) => list.findIndex((candidate) => candidate.modelId === item.modelId) === index)
+      .filter((item, index, list) => list.findIndex((candidate) => candidate.id === item.id) === index)
     : [];
   return {
     id,
@@ -257,25 +286,36 @@ export function createProviderDraft(): ProviderConfig {
 export function addManualProviderModel(provider: ProviderConfig, modelId: string): ProviderConfig {
   const id = String(modelId || '').trim();
   if (!id) return provider;
-  if (provider.models.some((entry) => entry.modelId === id)) return provider;
+  const duplicateCount = provider.models.filter((entry) => entry.modelId === id).length;
   return {
     ...provider,
     models: [
       ...provider.models,
-      { modelId: id, name: id, uses: [], manual: true },
+      {
+        id: createId('row'),
+        modelId: id,
+        name: duplicateCount > 0 ? `${id} (${duplicateCount + 1})` : id,
+        uses: guessModelUses(id),
+        manual: true,
+      },
     ],
   };
 }
 
 export function toggleProviderModelUse(
   provider: ProviderConfig,
-  modelId: string,
+  rowId: string,
   use: ModelUse,
 ): ProviderConfig {
+  const matchedByRowId = provider.models.filter((entry) => providerModelRowId(entry) === rowId);
+  const targets = matchedByRowId.length > 0
+    ? matchedByRowId
+    : provider.models.filter((entry) => entry.modelId === rowId);
+  const targetKeys = new Set(targets.map((entry) => providerModelRowId(entry)));
   return {
     ...provider,
     models: provider.models.map((entry) => {
-      if (entry.modelId !== modelId) return entry;
+      if (!targetKeys.has(providerModelRowId(entry))) return entry;
       const has = entry.uses.includes(use);
       return {
         ...entry,
@@ -330,6 +370,7 @@ export function migrateLegacyProviders(
       continue;
     }
     provider.models.push({
+      id: model.id || createId('row'),
       modelId: model.modelId,
       name: model.name || model.modelId,
       uses: ['image'],
@@ -347,13 +388,16 @@ export function migrateLegacyProviders(
     if (current) {
       if (!current.uses.includes('text')) current.uses.push('text');
       current.textConfigId = model.id;
+      if (isTextProviderProtocol(model.protocol)) current.textProtocol = model.protocol;
       continue;
     }
     provider.models.push({
+      id: model.id || createId('row'),
       modelId: model.modelId,
       name: model.name || model.modelId,
       uses: ['text'],
       textConfigId: model.id,
+      textProtocol: isTextProviderProtocol(model.protocol) ? model.protocol : undefined,
     });
   }
 

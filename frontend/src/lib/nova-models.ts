@@ -7,11 +7,11 @@ import {
 } from '@/lib/nova-text-protocol';
 import {
   ensureProviders,
+  guessTextProtocol,
   imageProtocolForKind,
   inferImagePreset,
   migrateLegacyProviders,
   normalizeProviderBaseUrl,
-  textProtocolForKind,
   type ProviderConfig,
 } from '@/lib/provider-registry';
 
@@ -456,6 +456,46 @@ function getInitialRegistry(): NovaModelRegistry {
   };
 }
 
+function isGeminiImageModelId(modelId: string): boolean {
+  const id = String(modelId || '').toLowerCase();
+  return id.includes('gemini') && id.includes('image');
+}
+
+function isGptImageModelId(modelId: string): boolean {
+  const id = String(modelId || '').toLowerCase();
+  return id.includes('gpt-image') || id.includes('dall-e') || id.includes('dalle');
+}
+
+export function resolveDerivedImagePreset(
+  kind: ProviderConfig['kind'],
+  modelId: string,
+  stored?: BuiltinImagePresetId,
+): BuiltinImagePresetId {
+  const inferred = inferImagePreset(kind, modelId);
+  const storedOk = stored && stored in BUILTIN_IMAGE_PRESETS ? stored : undefined;
+  if (isGeminiImageModelId(modelId) && (!storedOk || storedOk.startsWith('gpt-image') || storedOk.startsWith('grok-') || storedOk.startsWith('doubao') || storedOk.startsWith('alibaba'))) {
+    return inferred;
+  }
+  if (isGptImageModelId(modelId)) return 'gpt-image-2';
+  return storedOk || inferred;
+}
+
+export function resolveDerivedImageProtocol(
+  kind: ProviderConfig['kind'],
+  modelId: string,
+  presetId: BuiltinImagePresetId,
+): ProviderProtocol {
+  if (presetId.startsWith('grok-') || /grok-imagine-image|grok-imagine-edit/.test(modelId.toLowerCase())) return 'grok';
+  if (presetId.startsWith('doubao') || modelId.toLowerCase().includes('seedream')) return 'doubao';
+  if (presetId.startsWith('alibaba') || /qwen-image|^wan2/.test(modelId.toLowerCase())) return 'alibaba-dashscope';
+  if (isGptImageModelId(modelId) || presetId.startsWith('gpt-image')) return 'openai';
+  if (presetId === 'antigravity-gemini-image') return 'openai';
+  if (presetId.startsWith('gemini') || isGeminiImageModelId(modelId)) {
+    return kind === 'google' ? 'google' : 'openai';
+  }
+  return imageProtocolForKind(kind);
+}
+
 export function deriveImageAndTextModels(providers: ProviderConfig[]): {
   imageModels: ImageModelConfig[];
   textModels: TextModelConfig[];
@@ -470,17 +510,13 @@ export function deriveImageAndTextModels(providers: ProviderConfig[]): {
 
     for (const entry of provider.models) {
       if (entry.uses.includes('image')) {
-        const presetId = entry.builtinPreset && entry.builtinPreset in BUILTIN_IMAGE_PRESETS
-          ? entry.builtinPreset
-          : inferImagePreset(provider.kind, entry.modelId);
+        const presetId = resolveDerivedImagePreset(provider.kind, entry.modelId, entry.builtinPreset);
         const preset = BUILTIN_IMAGE_PRESETS[presetId];
-        const protocol = provider.kind === 'openai-compatible'
-          ? (presetId.startsWith('grok-') ? 'grok' : 'openai')
-          : imageProtocolForKind(provider.kind);
+        const protocol = resolveDerivedImageProtocol(provider.kind, entry.modelId, presetId);
         imageModels.push({
           id: entry.imageConfigId || `${provider.id}::img::${entry.modelId}`,
           protocol,
-          name: entry.name || entry.modelId,
+          name: String(entry.name || '').trim() || entry.modelId,
           modelId: entry.modelId,
           apiKey,
           baseUrl,
@@ -498,11 +534,13 @@ export function deriveImageAndTextModels(providers: ProviderConfig[]): {
       }
 
       if (entry.uses.includes('text')) {
-        const protocol = textProtocolForKind(provider.kind);
+        const protocol = isTextProviderProtocol(entry.textProtocol)
+          ? entry.textProtocol
+          : guessTextProtocol(provider.kind, entry.modelId);
         textModels.push({
           id: entry.textConfigId || `${provider.id}::txt::${entry.modelId}`,
           protocol,
-          name: entry.name || entry.modelId,
+          name: String(entry.name || '').trim() || entry.modelId,
           modelId: entry.modelId,
           apiKey,
           baseUrl,

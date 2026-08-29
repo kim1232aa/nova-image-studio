@@ -694,6 +694,7 @@ export function AgentChatWorkspace({ activeSessionId, wideMode = false, disabled
             images={agent.images}
             imageModel={intentRecognition ? agent.imageModel : userModel}
             hideControls={!intentRecognition}
+            failed={Boolean(agent.error)}
             onModelChange={agent.setImageModel}
             onApprove={(prompt, ids, _model, _params) => {
               if (intentRecognition) {

@@ -5,22 +5,25 @@ import { Eye, EyeOff, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { BUILTIN_IMAGE_PRESET_OPTIONS } from '@/lib/nova-models';
+import { BUILTIN_IMAGE_PRESET_OPTIONS, resolveDerivedImagePreset } from '@/lib/nova-models';
 import { fetchUpstreamModels } from '@/lib/provider-models-client';
 import {
   MODEL_USE_OPTIONS,
   PROVIDER_KIND_OPTIONS,
+  TEXT_PROTOCOL_OPTIONS,
   addManualProviderModel,
   createProviderDraft,
-  inferImagePreset,
+  guessTextProtocol,
   isCompleteProvider,
   listProtocolForKind,
   mergeFetchedModels,
+  providerModelRowId,
   toggleProviderModelUse,
   type ModelUse,
   type ProviderConfig,
   type ProviderKind,
 } from '@/lib/provider-registry';
+import type { TextProviderProtocol } from '@/lib/nova-text-protocol';
 
 interface ProviderSettingsPanelProps {
   providers: ProviderConfig[];
@@ -207,9 +210,11 @@ export function ProviderSettingsPanel({
                 <thead className="bg-muted/50 text-xs text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">模型 ID</th>
+                    <th className="px-3 py-2 text-left font-medium">别名</th>
                     {MODEL_USE_OPTIONS.map((option) => (
                       <th key={option.value} className="px-2 py-2 text-center font-medium">{option.label}</th>
                     ))}
+                    <th className="px-3 py-2 text-left font-medium">文本协议</th>
                     <th className="px-3 py-2 text-left font-medium">图片模板</th>
                     <th className="px-2 py-2" />
                   </tr>
@@ -217,16 +222,33 @@ export function ProviderSettingsPanel({
                 <tbody>
                   {selected.models.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="px-3 py-6 text-center text-xs text-muted-foreground">
+                      <td colSpan={9} className="px-3 py-6 text-center text-xs text-muted-foreground">
                         还没有模型。读取上游 /models，或手动填写模型 ID。
                       </td>
                     </tr>
                   )}
-                  {selected.models.map((entry) => (
-                    <tr key={entry.modelId} className="border-t">
+                  {selected.models.map((entry) => {
+                    const rowId = providerModelRowId(entry);
+                    return (
+                    <tr key={rowId} className="border-t">
                       <td className="px-3 py-2">
                         <div className="font-medium">{entry.modelId}</div>
                         {entry.manual && <div className="text-[11px] text-muted-foreground">手动添加</div>}
+                      </td>
+                      <td className="px-3 py-2 min-w-36">
+                        <Input
+                          value={entry.name}
+                          placeholder={entry.modelId}
+                          onChange={(event) => {
+                            const name = event.target.value;
+                            updateSelected((current) => ({
+                              ...current,
+                              models: current.models.map((item) => (
+                                providerModelRowId(item) === rowId ? { ...item, name } : item
+                              )),
+                            }));
+                          }}
+                        />
                       </td>
                       {MODEL_USE_OPTIONS.map((option) => (
                         <td key={option.value} className="px-2 py-2 text-center">
@@ -234,20 +256,38 @@ export function ProviderSettingsPanel({
                             type="checkbox"
                             checked={entry.uses.includes(option.value)}
                             onChange={() => {
-                              updateSelected((current) => toggleProviderModelUse(current, entry.modelId, option.value as ModelUse));
+                              updateSelected((current) => toggleProviderModelUse(current, rowId, option.value as ModelUse));
                             }}
                           />
                         </td>
                       ))}
                       <td className="px-3 py-2 min-w-40">
-                        {entry.uses.includes('image') ? (
+                        {entry.uses.includes('text') ? (
                           <Select
-                            value={entry.builtinPreset || inferImagePreset(selected.kind, entry.modelId)}
+                            value={entry.textProtocol || guessTextProtocol(selected.kind, entry.modelId)}
                             onValueChange={(value) => {
                               updateSelected((current) => ({
                                 ...current,
                                 models: current.models.map((item) => (
-                                  item.modelId === entry.modelId ? { ...item, builtinPreset: value as typeof entry.builtinPreset } : item
+                                  providerModelRowId(item) === rowId ? { ...item, textProtocol: value as TextProviderProtocol } : item
+                                )),
+                              }));
+                            }}
+                            options={TEXT_PROTOCOL_OPTIONS}
+                          />
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 min-w-40">
+                        {entry.uses.includes('image') ? (
+                          <Select
+                            value={resolveDerivedImagePreset(selected.kind, entry.modelId, entry.builtinPreset)}
+                            onValueChange={(value) => {
+                              updateSelected((current) => ({
+                                ...current,
+                                models: current.models.map((item) => (
+                                  providerModelRowId(item) === rowId ? { ...item, builtinPreset: value as typeof entry.builtinPreset } : item
                                 )),
                               }));
                             }}
@@ -263,17 +303,19 @@ export function ProviderSettingsPanel({
                           className="text-xs text-destructive"
                           onClick={() => updateSelected((current) => ({
                             ...current,
-                            models: current.models.filter((item) => item.modelId !== entry.modelId),
+                            models: current.models.filter((item) => providerModelRowId(item) !== rowId),
                           }))}
                         >
                           删除
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
+            <p className="text-[11px] text-muted-foreground">视频 / 音频目前只作标记，不会出现在生图或 Agent 模型列表里。</p>
           </div>
         )}
       </div>

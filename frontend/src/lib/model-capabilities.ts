@@ -291,7 +291,14 @@ export function supportsCustomSize(model: ModelId): boolean {
 }
 
 export function supportsAutoLayout(model: ModelId): boolean {
+  const modelConfig = getModelConfig(model);
+  if (isAntigravityGeminiModel(model, modelConfig)) return false;
   const presetId = getBuiltinPresetId(model);
+  if (isGrokImagePreset(presetId) || isSeedreamPreset(presetId)) return false;
+  if (String(presetId).startsWith('gemini') || String(presetId).startsWith('alibaba')) return false;
+  const upstreamId = String(modelConfig?.modelId || model).toLowerCase();
+  if (upstreamId.includes('gemini') && upstreamId.includes('image')) return false;
+  if (upstreamId.includes('grok-imagine')) return false;
   return String(presetId).startsWith('gpt-image-2');
 }
 
@@ -517,6 +524,40 @@ export function getDefaultRetryLayout(model: ModelId): { outputSize: OutputSize;
 }
 
 /** Strip residual auto layout for models that do not support it (Gemini / Antigravity Gemini, etc.). */
+const PROMPT_ASPECT_RATIOS = new Set<Exclude<AspectRatio, 'auto'>>([
+  '1:1', '1:4', '1:8', '2:3', '3:2', '3:4', '4:1', '4:3', '4:5', '5:4', '8:1', '9:16', '16:9', '21:9',
+]);
+
+/** Infer a concrete ratio from prompt text (e.g. "淘宝主图3:4" → 3:4). */
+export function inferAspectRatioFromPrompt(prompt?: string): Exclude<AspectRatio, 'auto'> | undefined {
+  const text = String(prompt || '');
+  const match = text.match(/(\d{1,2})\s*[:：]\s*(\d{1,2})/);
+  if (match) {
+    const ratio = `${Number(match[1])}:${Number(match[2])}` as Exclude<AspectRatio, 'auto'>;
+    if (PROMPT_ASPECT_RATIOS.has(ratio)) return ratio;
+  }
+  if (/淘宝主图|天猫主图/.test(text)) return '3:4';
+  return undefined;
+}
+
+/** Prompt-stated ratio wins; then sanitize auto/invalid values for the model. */
+export function resolveSubmitLayout(
+  model: ModelId,
+  outputSize: OutputSize,
+  aspectRatio: AspectRatio,
+  prompt?: string,
+): { outputSize: OutputSize; aspectRatio: AspectRatio } {
+  const inferred = inferAspectRatioFromPrompt(prompt);
+  if (inferred) {
+    const concreteSizes = getValidOutputSizes(model).filter((size): size is Exclude<OutputSize, 'auto'> => size !== 'auto');
+    const nextSize = outputSize === 'auto' || !getValidOutputSizes(model).includes(outputSize)
+      ? (concreteSizes.includes('1K') ? '1K' : (concreteSizes[0] || '1K'))
+      : outputSize;
+    return sanitizeLayoutForModel(model, nextSize, inferred);
+  }
+  return sanitizeLayoutForModel(model, outputSize, aspectRatio);
+}
+
 export function sanitizeLayoutForModel(
   model: ModelId,
   outputSize: OutputSize,

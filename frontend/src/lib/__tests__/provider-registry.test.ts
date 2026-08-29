@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   addManualProviderModel,
   guessModelUses,
+  guessTextProtocol,
   mergeFetchedModels,
   migrateLegacyProviders,
   parseUpstreamModelList,
@@ -10,6 +11,8 @@ import {
 import {
   deriveImageAndTextModels,
   loadRegistry,
+  resolveDerivedImagePreset,
+  resolveDerivedImageProtocol,
   saveRegistry,
   type ImageModelConfig,
   type TextModelConfig,
@@ -34,6 +37,9 @@ describe('provider registry', () => {
     expect(guessModelUses('gpt-4o-mini')).toEqual(['text']);
     expect(guessModelUses('gemini-3-pro-image-preview')).toEqual(['image']);
     expect(guessModelUses('grok-imagine-image')).toEqual(['image']);
+    expect(guessModelUses('grok-imagine-edit')).toEqual(['image']);
+    expect(guessModelUses('grok-imagine')).toEqual(['text']);
+    expect(guessModelUses('grok-4.5')).toEqual(['text']);
     expect(guessModelUses('grok-imagine-video')).toEqual(['video']);
     expect(guessModelUses('sora-2')).toEqual(['video']);
     expect(guessModelUses('whisper-1')).toEqual(['audio']);
@@ -51,10 +57,9 @@ describe('provider registry', () => {
       [{ modelId: 'gpt-4o-mini', name: 'Mini', uses: ['text', 'image'] }],
       ['gpt-4o-mini', 'grok-imagine-image'],
     );
-    expect(merged).toEqual([
-      { modelId: 'gpt-4o-mini', name: 'Mini', uses: ['text', 'image'] },
-      { modelId: 'grok-imagine-image', name: 'grok-imagine-image', uses: ['image'] },
-    ]);
+    expect(merged[0]).toEqual({ modelId: 'gpt-4o-mini', name: 'Mini', uses: ['text', 'image'] });
+    expect(merged[1]).toMatchObject({ modelId: 'grok-imagine-image', name: 'grok-imagine-image', uses: ['image'] });
+    expect(merged[1].id).toBeTruthy();
   });
 
   it('migrates old text/image rows that share a key into one provider', () => {
@@ -169,9 +174,73 @@ describe('provider registry', () => {
       baseUrl: 'https://example.test',
       models: [],
     }, 'my-hidden-model');
-    expect(provider.models[0]).toMatchObject({ modelId: 'my-hidden-model', manual: true, uses: [] });
-    const toggled = toggleProviderModelUse(provider, 'my-hidden-model', 'text');
-    expect(toggled.models[0].uses).toEqual(['text']);
+    expect(provider.models[0]).toMatchObject({ modelId: 'my-hidden-model', manual: true, uses: ['text'] });
+    const toggled = toggleProviderModelUse(provider, provider.models[0].id || 'my-hidden-model', 'image');
+    expect(toggled.models[0].uses).toEqual(['text', 'image']);
+  });
+
+  it('keeps a second copy of the same model id so aliases can differ', () => {
+    const first = addManualProviderModel({
+      id: 'prov_1',
+      name: 'Gateway',
+      kind: 'openai-compatible',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test',
+      models: [],
+    }, 'gpt-image-2');
+    const renamed = {
+      ...first,
+      models: first.models.map((entry, index) => index === 0 ? { ...entry, name: 'GPT Image 稳' } : entry),
+    };
+    const second = addManualProviderModel(renamed, 'gpt-image-2');
+    expect(second.models).toHaveLength(2);
+    expect(second.models[0].name).toBe('GPT Image 稳');
+    expect(second.models[1].name).toBe('gpt-image-2 (2)');
+    expect(second.models[0].id).not.toBe(second.models[1].id);
+  });
+
+  it('keeps gpt-5 text models on Responses and claude gateways on Chat Completions', () => {
+    expect(guessTextProtocol('openai-compatible', 'gpt-5.5')).toBe('openai-responses');
+    expect(guessTextProtocol('openai-compatible', 'claude-sonnet-4-6')).toBe('openai-chat-completions');
+
+    const migrated = migrateLegacyProviders([], [{
+      id: 'txt_old',
+      protocol: 'openai-responses',
+      name: 'GPT 5.5',
+      modelId: 'gpt-5.5',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+    }]);
+    const derived = deriveImageAndTextModels(migrated);
+    expect(derived.textModels[0].protocol).toBe('openai-responses');
+  });
+
+  it('corrects gemini image presets stored as gpt-image-2 and gpt-image on google providers', () => {
+    expect(resolveDerivedImagePreset('google', 'gemini-3.1-flash-image', 'gpt-image-2')).toBe('gemini-3.1-flash-image-preview');
+    expect(resolveDerivedImageProtocol('google', 'gemini-3.1-flash-image', 'gemini-3.1-flash-image-preview')).toBe('google');
+    expect(resolveDerivedImageProtocol('google', 'gpt-image-2-c', 'gpt-image-2')).toBe('openai');
+
+    const derived = deriveImageAndTextModels([{
+      id: 'prov_google',
+      name: 'Google mix',
+      kind: 'google',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test',
+      models: [
+        { modelId: 'gemini-3.1-flash-image', name: 'Gemini', uses: ['image'], builtinPreset: 'gpt-image-2' },
+        { modelId: 'gpt-image-2-c', name: 'GPT Image 稳', uses: ['image'], builtinPreset: 'gpt-image-2' },
+      ],
+    }]);
+    expect(derived.imageModels[0]).toMatchObject({
+      modelId: 'gemini-3.1-flash-image',
+      protocol: 'google',
+      builtinPreset: 'gemini-3.1-flash-image-preview',
+    });
+    expect(derived.imageModels[1]).toMatchObject({
+      modelId: 'gpt-image-2-c',
+      protocol: 'openai',
+      builtinPreset: 'gpt-image-2',
+    });
   });
 
   it('does not persist private gateway hostnames from tests', () => {

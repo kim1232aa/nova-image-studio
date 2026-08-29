@@ -52,6 +52,7 @@ vi.mock('@/lib/model-capabilities', () => ({
   normalizeCustomImageSize: vi.fn((value: string | undefined) => value),
   normalizeModel: vi.fn((value: string) => value),
   sanitizeLayoutForModel: vi.fn(),
+  resolveSubmitLayout: vi.fn((_model: string, outputSize: string, aspectRatio: string) => ({ outputSize, aspectRatio })),
   supportsCustomSize: vi.fn(() => false),
   supportsGptImageAdvancedParams: vi.fn(() => false),
   PARALLEL_COUNT_VALUES: [1, 2, 3, 4],
@@ -417,5 +418,34 @@ describe('useAgentChat session binding', () => {
     await act(async () => {
       await replacementApproval;
     });
+  });
+
+  it('persists a system note when the agent stream errors', async () => {
+    let onError!: (error: Error) => void;
+    client.streamAgentChat.mockImplementation((_request, callbacks) => {
+      onError = callbacks.onError;
+      return { abort: vi.fn() };
+    });
+
+    const { result } = renderHook(() => useAgentChat('session-42'));
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(async () => {
+      await result.current.sendMessage('一只红色陶瓷杯', [], []);
+    });
+
+    act(() => onError(new Error('HTTP 429: All accounts exhausted')));
+
+    expect(result.current.error).toBe('HTTP 429: All accounts exhausted');
+    expect(result.current.phase).toBe('idle');
+    expect(result.current.messages.some(message => (
+      message.role === 'system-note' && message.text.includes('HTTP 429: All accounts exhausted')
+    ))).toBe(true);
+    expect(store.putMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: 'system-note',
+        text: '请求失败：HTTP 429: All accounts exhausted',
+      }),
+      'session-42',
+    );
   });
 });

@@ -66,6 +66,7 @@ interface AgentProposalCardProps {
   imageModel: ModelId;
   busy?: boolean;
   hideControls?: boolean;
+  failed?: boolean;
   onModelChange: (model: ModelId) => void;
   onApprove: (prompt: string, selectedImageIds: string[], model: ModelId, params: AgentApproveParams) => void;
   onCancel: () => void;
@@ -108,6 +109,7 @@ export function AgentProposalCard({
   imageModel,
   busy = false,
   hideControls = false,
+  failed = false,
   onModelChange,
   onApprove,
   onCancel,
@@ -136,6 +138,14 @@ export function AgentProposalCard({
   const [tempPopoverOpen, setTempPopoverOpen] = useState(false);
   const [parallelPopoverOpen, setParallelPopoverOpen] = useState(false);
   const [customSizeDialogOpen, setCustomSizeDialogOpen] = useState(false);
+
+  useEffect(() => () => {
+    setModelPopoverOpen(false);
+    setSizePopoverOpen(false);
+    setAspectPopoverOpen(false);
+    setTempPopoverOpen(false);
+    setParallelPopoverOpen(false);
+  }, []);
 
   const imageMap = useMemo(() => new Map(scopedImages.map(img => [img.imgId, img])), [scopedImages]);
 
@@ -310,7 +320,9 @@ export function AgentProposalCard({
             {effectiveMode === 'edit' ? <Pencil className="h-3 w-3" /> : <Wand2 className="h-3 w-3" />}
             {effectiveMode === 'edit' ? '参考图生成' : '生成新图'}
           </span>
-          <span className="text-xs text-muted-foreground">等待你确认</span>
+          <span className={cn('text-xs', failed ? 'text-destructive' : 'text-muted-foreground')}>
+            {failed ? '生成失败，可修改后重试' : '等待你确认'}
+          </span>
         </div>
       </div>
 
@@ -386,7 +398,7 @@ export function AgentProposalCard({
 
       {!hideControls && (
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
-        <Popover open={modelPopoverOpen} onOpenChange={setModelPopoverOpen}>
+        <Popover modal={false} open={modelPopoverOpen} onOpenChange={setModelPopoverOpen}>
           <PopoverTrigger
             disabled={busy}
             className={cn(buttonVariants({ variant: 'outline', size: 'xs' }), 'gap-1')}
@@ -401,7 +413,7 @@ export function AgentProposalCard({
                 type="button"
                 onClick={() => {
                   handleModelChange(option.value);
-                  setModelPopoverOpen(false);
+                  setTimeout(() => setModelPopoverOpen(false), 0);
                 }}
                 className={cn(
                   'w-full text-left px-2.5 py-1.5 rounded-md text-sm hover:bg-muted',
@@ -598,7 +610,7 @@ export function AgentProposalCard({
           </Button>
           <Button size="sm" onClick={handleApprove} disabled={busy || overLimit || prompt.trim().length === 0} className="gap-1">
             <Check className="h-3.5 w-3.5" />
-            {effectiveMode === 'edit' ? '允许并生成' : '允许并生成'}
+            {failed ? '重试生成' : '允许并生成'}
           </Button>
         </div>
       </div>

@@ -8,6 +8,7 @@ import { fetchImageAsBlob } from '@/lib/image-downloader';
 import {
   getGptImageAdvancedParamsForModel,
   resolveAgentModel,
+  resolveSubmitLayout,
   type AgentModelCatalogEntry,
   type AgentResolvedLayout,
 } from '@/lib/model-capabilities';
@@ -531,9 +532,27 @@ export function useAgentChat(sessionId = 'default') {
     return description;
   }, [getAgentTextModelConfig, images]);
 
+  const persistStreamFailure = useCallback((message: string) => {
+    if (!mountedRef.current) return;
+    setError(message);
+    appendMessage({
+      id: generateUUID(),
+      role: 'system-note',
+      text: `请求失败：${message}`,
+      createdAt: Date.now(),
+    });
+    setPhase('idle');
+  }, [appendMessage]);
+
   const runChat = useCallback((history: AgentMessage[], catalog: AgentImageRecord[]) => {
     if (!mountedRef.current) return;
-    const configured = getAgentTextModelConfig();
+    let configured: ReturnType<typeof getAgentTextModelConfig>;
+    try {
+      configured = getAgentTextModelConfig();
+    } catch (err) {
+      persistStreamFailure(err instanceof Error ? err.message : '请求失败');
+      return;
+    }
     const modelCatalog = buildModelCatalog();
     setPhase('streaming');
     flushAndCancelRaf();
@@ -635,14 +654,13 @@ export function useAgentChat(sessionId = 'default') {
           flushAndCancelRaf();
           setStreamingText('');
           setStreamingReasoning('');
-          setError(err.message);
-          setPhase('idle');
+          persistStreamFailure(err.message || '请求失败');
         },
       },
       configured.baseUrl,
     );
     streamHandleRef.current = handle;
-  }, [appendMessage, appendStreamingToken, flushAndCancelRaf, getAgentTextModelConfig, webSearchEnabled, cdpEnabled, cdpExecutor]);
+  }, [appendMessage, appendStreamingToken, flushAndCancelRaf, getAgentTextModelConfig, persistStreamFailure, webSearchEnabled, cdpEnabled, cdpExecutor]);
 
   const sendMessage = useCallback(async (text: string, uploads: PendingUpload[], imageReferences?: string[]) => {
     if (!mountedRef.current || !ready || phase !== 'idle') return;
@@ -1197,6 +1215,7 @@ export function useAgentChat(sessionId = 'default') {
       const mode = references.length > 0 ? 'image-to-image' : 'text-to-image';
       const provider = resolveImageTaskProvider(model);
       if (!mountedRef.current || generationEpochRef.current !== generationEpoch) return;
+      const layout = resolveSubmitLayout(model, params.outputSize, params.aspectRatio, prompt);
 
       const taskId = await createNovaTask({
         apiKey: provider.apiKey,
@@ -1204,9 +1223,9 @@ export function useAgentChat(sessionId = 'default') {
         protocol: provider.protocol,
         mode,
         prompt,
-        outputSize: params.outputSize,
-        customSize: params.customSize,
-        aspectRatio: params.aspectRatio,
+        outputSize: layout.outputSize,
+        customSize: layout.outputSize === 'auto' ? undefined : params.customSize,
+        aspectRatio: layout.aspectRatio,
         temperature: params.temperature,
         model: provider.modelId,
         gptImageQuality: params.gptImageQuality,
@@ -1226,9 +1245,9 @@ export function useAgentChat(sessionId = 'default') {
         pendingReasoning: pendingReasoningRef.current,
         selectedImageIds,
         model,
-        outputSize: params.outputSize,
-        customSize: params.customSize,
-        aspectRatio: params.aspectRatio,
+        outputSize: layout.outputSize,
+        customSize: layout.outputSize === 'auto' ? undefined : params.customSize,
+        aspectRatio: layout.aspectRatio,
         temperature: params.temperature,
         gptImageQuality: params.gptImageQuality,
         gptImageStyle: params.gptImageStyle,
@@ -1274,9 +1293,9 @@ export function useAgentChat(sessionId = 'default') {
             prompt,
             referencedImageIds: selectedImageIds,
             model,
-            outputSize: params.outputSize,
-            customSize: params.customSize,
-            aspectRatio: params.aspectRatio,
+            outputSize: layout.outputSize,
+            customSize: layout.outputSize === 'auto' ? undefined : params.customSize,
+            aspectRatio: layout.aspectRatio,
             temperature: params.temperature,
             gptImageQuality: params.gptImageQuality,
             gptImageStyle: params.gptImageStyle,
@@ -1307,9 +1326,9 @@ export function useAgentChat(sessionId = 'default') {
           prompt,
           referencedImageIds: selectedImageIds,
           model,
-          outputSize: params.outputSize,
-          customSize: params.customSize,
-          aspectRatio: params.aspectRatio,
+          outputSize: layout.outputSize,
+          customSize: layout.outputSize === 'auto' ? undefined : params.customSize,
+          aspectRatio: layout.aspectRatio,
           temperature: params.temperature,
           gptImageQuality: params.gptImageQuality,
           gptImageStyle: params.gptImageStyle,

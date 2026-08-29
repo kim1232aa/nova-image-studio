@@ -108,4 +108,13 @@ describe('AgentProposalCard', () => {
     expect(prompt).not.toContain('横版');
     expect(params.aspectRatio).toBe('9:16');
   });
+
+  it('失败后显示可重试文案，不再写等待确认', () => {
+    renderCard({ failed: true });
+
+    expect(screen.getByText('生成失败，可修改后重试')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重试生成' })).toBeInTheDocument();
+    expect(screen.queryByText('等待你确认')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '允许并生成' })).not.toBeInTheDocument();
+  });
 });

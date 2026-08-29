@@ -70,6 +70,17 @@ function getTextModelLabel(models: TextModelConfig[], id: string): string | unde
   return models.find((model) => model.id === id)?.name;
 }
 
+function modelPickerOptions(models: Array<{ id: string; name: string; modelId: string }>): { value: string; label: string }[] {
+  return models.map((model) => {
+    const base = model.name.trim() || model.modelId;
+    const sameName = models.filter((item) => (item.name.trim() || item.modelId) === base);
+    if (sameName.length === 1) return { value: model.id, label: base };
+    const sameModelId = sameName.filter((item) => item.modelId === model.modelId);
+    if (sameModelId.length === 1) return { value: model.id, label: `${base} · ${model.modelId}` };
+    return { value: model.id, label: `${base} · ${model.modelId} · ${model.id.slice(-6)}` };
+  });
+}
+
 function normalizeDefaults(
   defaults: DefaultModels,
   imageModels: ImageModelConfig[],
@@ -239,12 +250,12 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModal
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const completeImageOptions = imageModels.filter(isCompleteImageModel).map((model) => ({ value: model.id, label: model.name }));
-  const completeTextOptions = textModels.filter(isCompleteTextModel).map((model) => ({ value: model.id, label: model.name }));
+  const completeImageOptions = modelPickerOptions(imageModels.filter(isCompleteImageModel));
+  const completeTextOptions = modelPickerOptions(textModels.filter(isCompleteTextModel));
   // 切图的图片编辑只能落在 openai 协议模型上（带 mask 的 /v1/images/edits）
-  const sliceCapableImageOptions = imageModels
-    .filter((model) => isCompleteImageModel(model) && isSliceCapableImageModel(model))
-    .map((model) => ({ value: model.id, label: model.name }));
+  const sliceCapableImageOptions = modelPickerOptions(
+    imageModels.filter((model) => isCompleteImageModel(model) && isSliceCapableImageModel(model)),
+  );
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => {

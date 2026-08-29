@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Check, Copy, Maximize, RectangleHorizontal, Sparkles, Thermometer } from 'lucide-react';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
@@ -58,6 +58,14 @@ export function GenerationParamsBar({ value, onChange, size = 'xs', className }:
   const [temperaturePopoverOpen, setTemperaturePopoverOpen] = useState(false);
   const [customSizeDialogOpen, setCustomSizeDialogOpen] = useState(false);
 
+  useEffect(() => () => {
+    setModelPopoverOpen(false);
+    setSizePopoverOpen(false);
+    setAspectPopoverOpen(false);
+    setParallelPopoverOpen(false);
+    setTemperaturePopoverOpen(false);
+  }, []);
+
   const model = value.model;
   const sizeOptions = getSizeOptions(model);
   const aspectRatioOptions = getAspectRatioOptions(model, value.outputSize);
@@ -114,7 +122,7 @@ export function GenerationParamsBar({ value, onChange, size = 'xs', className }:
   return (
     <div className={cn('flex flex-wrap items-center gap-1.5', className)}>
       {/* 模型选择 */}
-      <Popover open={modelPopoverOpen} onOpenChange={setModelPopoverOpen}>
+      <Popover modal={false} open={modelPopoverOpen} onOpenChange={setModelPopoverOpen}>
         <PopoverTrigger className={cn(buttonVariants({ variant: 'outline', size }), 'gap-1')} title="模型选择">
           <Sparkles className="h-3 w-3" />
           <span className="shrink-0 truncate text-[11px]">{MODEL_OPTIONS.find(o => o.value === model)?.label}</span>
@@ -125,7 +133,7 @@ export function GenerationParamsBar({ value, onChange, size = 'xs', className }:
               key={option.value}
               onClick={() => {
                 handleModelChange(option.value);
-                setModelPopoverOpen(false);
+                setTimeout(() => setModelPopoverOpen(false), 0);
               }}
               className={cn('w-full text-left px-2.5 py-1.5 rounded-md text-sm hover:bg-muted', model === option.value && 'bg-muted font-medium')}
             >

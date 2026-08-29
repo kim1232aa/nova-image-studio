@@ -4,6 +4,7 @@ import {
   getSupportsTemperature,
   getValidOutputSizes,
   isRetryLayoutCompatible,
+  supportsAutoLayout,
   supportsCustomSize,
 } from '@/lib/model-capabilities';
 import {
@@ -41,6 +42,24 @@ describe('protocol layout contracts', () => {
     })).toBe(false);
     expect(isSliceCapableImageModel(registered('gemini-3-pro-image-preview'))).toBe(false);
     expect(isSliceCapableImageModel(registered('grok-imagine-image-edit'))).toBe(false);
+  });
+
+  it('does not enable auto layout for Gemini or Grok even if preset is gpt-image-2', () => {
+    expect(supportsAutoLayout('gpt-image-2')).toBe(true);
+    expect(supportsAutoLayout('antigravity-gemini-image')).toBe(false);
+    expect(supportsAutoLayout('grok-imagine-image')).toBe(false);
+    expect(supportsAutoLayout('gemini-3.1-flash-image-preview')).toBe(false);
+
+    saveRegistry({
+      imageModels: [{
+        ...registered('gpt-image-2', 'mislabelled-gemini'),
+        builtinPreset: 'gpt-image-2',
+        modelId: 'gemini-3.1-flash-image',
+      }],
+      textModels: [],
+      defaults: DEFAULT_DEFAULTS,
+    });
+    expect(supportsAutoLayout('mislabelled-gemini')).toBe(false);
   });
 
   it('does not give Antigravity Gemini GPT custom-size support', () => {

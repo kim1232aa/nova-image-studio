@@ -1160,8 +1160,7 @@ function getAntigravityGeminiImageSize(outputSize) {
   const normalized = String(outputSize || '').trim().toUpperCase();
   if (normalized === '4K') return '4K';
   if (normalized === '2K') return '2K';
-  if (normalized === '1K' || normalized === '512') return '1K';
-  return undefined;
+  return '1K';
 }
 
 function getAntigravityGeminiQuality(outputSize) {
@@ -1174,9 +1173,7 @@ function getAntigravityGeminiQuality(outputSize) {
 
 function resolveOpenAiImageRequestSize(request) {
   if (isAntigravityGeminiImageModel(request.model)) {
-    const aspectRatio = String(request.aspectRatio || '').trim();
-    if (aspectRatio && aspectRatio !== 'auto') return aspectRatio;
-    return undefined;
+    return resolveGeminiAspectRatio(request);
   }
   return resolveGptImageRequestSize(request);
 }
@@ -1722,12 +1719,30 @@ const GEMINI_NATIVE_ASPECT_RATIOS = new Set([
   '1:4', '1:8', '4:1', '8:1',
 ]);
 
+function inferAspectRatioFromPrompt(prompt) {
+  const text = String(prompt || '');
+  const match = text.match(/(\d{1,2})\s*[:：]\s*(\d{1,2})/);
+  if (match) {
+    const ratio = `${Number(match[1])}:${Number(match[2])}`;
+    if (GEMINI_NATIVE_ASPECT_RATIOS.has(ratio)) return ratio;
+  }
+  if (/淘宝主图|天猫主图/.test(text)) return '3:4';
+  return undefined;
+}
+
+function resolveGeminiAspectRatio(request = {}) {
+  const fromPrompt = inferAspectRatioFromPrompt(request.prompt);
+  if (fromPrompt) return fromPrompt;
+  const rawRatio = String(request.aspectRatio || '').trim();
+  if (GEMINI_NATIVE_ASPECT_RATIOS.has(rawRatio)) return rawRatio;
+  return '1:1';
+}
+
 function resolveGeminiImageConfig(request = {}) {
   const rawSize = String(request.outputSize || '').trim().toUpperCase();
-  const rawRatio = String(request.aspectRatio || '').trim();
   return {
     imageSize: GEMINI_NATIVE_IMAGE_SIZES.has(rawSize) ? rawSize : '1K',
-    aspectRatio: GEMINI_NATIVE_ASPECT_RATIOS.has(rawRatio) ? rawRatio : '1:1',
+    aspectRatio: resolveGeminiAspectRatio(request),
   };
 }
 

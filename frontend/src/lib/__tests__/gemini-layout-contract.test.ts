@@ -9,8 +9,10 @@ import {
   getAspectRatioOptions,
   getDefaultRetryLayout,
   getValidOutputSizes,
+  inferAspectRatioFromPrompt,
   isRetryLayoutCompatible,
   resolveAgentLayout,
+  resolveSubmitLayout,
   sanitizeLayoutForModel,
   supportsAutoLayout,
 } from '@/lib/model-capabilities';
@@ -107,5 +109,26 @@ describe('Gemini layout contract', () => {
     const flashRatios = getAspectRatioOptions(GEMINI_31_PRESET_ID, '1K').map(option => option.value);
     expect(flashRatios).toContain('3:4');
     expect(flashRatios).toEqual(expect.arrayContaining(['1:4', '1:8', '4:1', '8:1']));
+  });
+
+  it('infers 3:4 from 淘宝主图 prompts and never submits Gemini auto', () => {
+    expect(inferAspectRatioFromPrompt('淘宝主图3:4')).toBe('3:4');
+    expect(inferAspectRatioFromPrompt('生成一张16:9横图')).toBe('16:9');
+    expect(inferAspectRatioFromPrompt('淘宝主图 白底')).toBe('3:4');
+    expect(inferAspectRatioFromPrompt('普通提示词')).toBeUndefined();
+
+    expect(resolveSubmitLayout(GEMINI_31_PRESET_ID, 'auto', 'auto', '淘宝主图3:4')).toEqual({
+      outputSize: '1K',
+      aspectRatio: '3:4',
+    });
+    expect(resolveSubmitLayout('antigravity-gemini-image', 'auto', 'auto', '淘宝主图')).toEqual({
+      outputSize: '1K',
+      aspectRatio: '3:4',
+    });
+    expect(resolveSubmitLayout(GEMINI_PRESET_ID, '1K', '1:1', '淘宝主图3:4').aspectRatio).toBe('3:4');
+    expect(resolveSubmitLayout('gpt-image-2', 'auto', 'auto', '淘宝主图3:4')).toEqual({
+      outputSize: '1K',
+      aspectRatio: '3:4',
+    });
   });
 });
